@@ -88,6 +88,8 @@ import { compareVersions } from './versions'
 export const FOLDER_PER_SESSION = '--folder-per-session'
 /** The router's flag naming the flag a session's process may start with when Kettu asks. */
 const SESSION_FLAG = '--session-flag='
+const SESSION_DEFAULT_FLAG = '--session-default-flag='
+const ROOT_FLAG_HELP = '--root-flag-help'
 
 export type LaunchKind =
   // Installed from npm into the data directory and run on the user's Node.js. With `perSession`,
@@ -123,7 +125,15 @@ export type LaunchKind =
   // With `perSession`, through the session router, which starts each session's process in the
   // session's own folder, for a program that runs everything in the folder it started in, and
   // with `sessionFlag` added for a session Kettu asks for it, once the program's help lists it.
-  | { kind: 'binary'; command: string; args: string[]; perSession?: true; sessionFlag?: string }
+  | {
+      kind: 'binary'
+      command: string
+      args: string[]
+      perSession?: true
+      sessionFlag?: string
+      sessionDefaultFlag?: string
+      rootFlagHelp?: true
+    }
   // Run as `uvx <package>==<version> <args>`, which installs the package on first use.
   | { kind: 'uvx'; package: string; args: string[]; minimum?: string }
   // A script run with Electron's own Node.js, so it needs no Node.js on the machine.
@@ -675,14 +685,18 @@ function routedDetection(
   ctx: Pick<DetectContext, 'nodeRuntime' | 'sessionRouterPath'>,
   display: CommandWords,
   env: Record<string, string>,
-): Detection {
+): Extract<Detection, { state: 'available' }> {
   const runtime = ctx.nodeRuntime
-  const flag = launch.sessionFlag ? [`${SESSION_FLAG}${launch.sessionFlag}`] : []
+  const flags = [
+    ...(launch.sessionFlag ? [`${SESSION_FLAG}${launch.sessionFlag}`] : []),
+    ...(launch.sessionDefaultFlag ? [`${SESSION_DEFAULT_FLAG}${launch.sessionDefaultFlag}`] : []),
+    ...(launch.rootFlagHelp ? [ROOT_FLAG_HELP] : []),
+  ]
   return {
     state: 'available',
     spec: {
       command: runtime.command,
-      args: [ctx.sessionRouterPath!, FOLDER_PER_SESSION, ...flag, program, ...launch.args],
+      args: [ctx.sessionRouterPath!, FOLDER_PER_SESSION, ...flags, program, ...launch.args],
       env: { ...runtime.env, ...env },
       shell: false,
       display: { ...display, env },
@@ -1157,10 +1171,16 @@ async function detectInstall(def: AgentDefinition, ctx: DetectContext): Promise<
         if (!(await ctx.isExecutable(ctx.binaryOverride))) {
           return chosenUnusable(def, ctx.binaryOverride)
         }
-        return binaryDetection(ctx.binaryOverride, launch.args, ctx.platform, display, env)
+        return launch.perSession && ctx.sessionRouterPath
+          ? routedDetection(ctx.binaryOverride, launch, ctx, display, env)
+          : binaryDetection(ctx.binaryOverride, launch.args, ctx.platform, display, env)
       }
       const program = await findCommand(launch.command, ctx)
-      if (program) return binaryDetection(program, launch.args, ctx.platform, display, env)
+      if (program) {
+        return launch.perSession && ctx.sessionRouterPath
+          ? routedDetection(program, launch, ctx, display, env)
+          : binaryDetection(program, launch.args, ctx.platform, display, env)
+      }
       // The user's own copy wins, so their sign-in and configuration stay; without one,
       // Kettu's archive install runs: the version wanted, else the one that ran before.
       if (def.installs?.archive && choice) {
@@ -1174,7 +1194,9 @@ async function detectInstall(def: AgentDefinition, ctx: DetectContext): Promise<
             const display = { command, args: installed.args, env }
             const { version, dir } = installed
             return {
-              ...binaryDetection(command, installed.args, ctx.platform, display, env, version),
+              ...(launch.perSession && ctx.sessionRouterPath
+                ? routedDetection(command, { ...launch, args: installed.args }, ctx, display, env)
+                : binaryDetection(command, installed.args, ctx.platform, display, env, version)),
               release: { version, dir },
             }
           } catch {

@@ -636,6 +636,9 @@
     "unknownTool": "Unknown tool content",
     "toolCall": "Tool call"
   },
+  "omp": {
+    "fullAccessDescription": "Automatically approves OMP tools unless an explicit policy requires approval or blocks them. Grants Kettu's Full access permissions."
+  },
   "antigravity": {
     "plan": {
       "title": "Plan"

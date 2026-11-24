@@ -5,7 +5,16 @@ export const OMP: AgentDefinition = {
   limitsReason: 'not-yet-supported',
   name: 'OMP',
   registryId: 'omp',
-  launch: { kind: 'binary', command: 'omp', args: ['acp'] },
+  // OMP takes its approval policy at startup and lists the flags in its top-level help.
+  launch: {
+    kind: 'binary',
+    command: 'omp',
+    args: ['acp'],
+    perSession: true,
+    sessionFlag: '--approval-mode=yolo',
+    sessionDefaultFlag: '--approval-mode=always-ask',
+    rootFlagHelp: true,
+  },
   install: {
     hint: 'detect.hint.omp',
     url: 'https://omp.sh',

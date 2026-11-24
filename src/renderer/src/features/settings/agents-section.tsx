@@ -1463,6 +1463,11 @@ function StartModeRow({ status }: { status: AgentStatus }) {
         ? t('agents.startMode.readFailed')
         : null)
   const { name, description } = entryText('agents.start-mode')
+  const harness = status.harnessId
+  const follow =
+    harness === 'codex' || harness === 'deepseek' || harness === 'antigravity' || harness === 'omp'
+      ? harness
+      : 'claude-code'
   return (
     <RowShell id="start-mode">
       <RowLine text={<RowText name={name} description={description} />}>
@@ -1476,9 +1481,7 @@ function StartModeRow({ status }: { status: AgentStatus }) {
             options={[
               {
                 value: FOLLOW_AGENT,
-                label: t(
-                  `agents.startMode.follow.${status.harnessId === 'codex' || status.harnessId === 'deepseek' || status.harnessId === 'antigravity' ? status.harnessId : 'claude-code'}`,
-                ),
+                label: t(`agents.startMode.follow.${follow}`),
               },
               ...view.choices.map((choice) => ({
                 value: choice.value,

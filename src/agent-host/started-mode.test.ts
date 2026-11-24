@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isFullAccessMode } from '@shared/agents'
+import { isFullAccessMode, OMP_FULL_ACCESS } from '@shared/agents'
 import {
   defaultMode,
   modeRank,
@@ -70,6 +70,13 @@ describe('the mode of a started session', () => {
     const codex = { harness: 'codex', mode: 'agent' } as const
     expect(started({ harness: 'antigravity', mode: 'accept-edits' }, codex)).toBe('workspace-write')
     expect(started({ harness: 'antigravity', mode: 'plan' }, codex)).toBe('read-only')
+  })
+
+  it('gives an OMP starter Full access rank and keeps sessions it starts below that rank', () => {
+    expect(starterRank('omp', OMP_FULL_ACCESS, false)).toBe(4)
+    expect(
+      started({ harness: 'omp', mode: OMP_FULL_ACCESS }, { harness: 'omp', mode: OMP_FULL_ACCESS }),
+    ).toBe('default')
   })
 
   it('counts planning and modes it does not know as asking', () => {

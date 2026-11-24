@@ -1,17 +1,14 @@
-// agy's own full access, `--dangerously-skip-permissions`, as a row after agy's modes. agy 1.5.9
-// takes the flag only as its process starts, and the session router runs one process for each of
-// its sessions: entering full access starts the session's process again with the flag, leaving it
-// starts it again without, and each resumes the same session. agy then approves everything itself;
-// Kettu approves nothing in its place. A new process comes back at agy's own model and in Default,
-// which full access holds, so the session's values are set again.
+// OMP and Antigravity expose ordinary modes over ACP but take Full access as a process flag.
+// Kettu's session router changes that flag for one session at a time.
 
-import { ANTIGRAVITY_FULL_ACCESS } from '@shared/agents'
+import { ANTIGRAVITY_FULL_ACCESS, OMP_FULL_ACCESS } from '@shared/agents'
 import { isConfigValue, type ConfigOption } from '@shared/thread'
 import { t } from '../i18n'
 import { compareVersions } from '../versions'
 import { MODE_OPTION } from './agy-plan'
 
 export const FULL_ACCESS = ANTIGRAVITY_FULL_ACCESS
+export type ProcessAccessMode = typeof FULL_ACCESS | typeof OMP_FULL_ACCESS
 export const FULL_ACCESS_VERSION = '1.5.9'
 /** agy's own mode while its process runs with the flag: Plan mode would still only plan. */
 export const HELD_MODE = 'default'
@@ -28,17 +25,33 @@ export function offersFullAccess(version: string | null, meta: unknown): boolean
   return typeof flag === 'string' && flag !== ''
 }
 
-/** The session's options with Full access after agy's modes, chosen while `full`. */
-export function withFullAccess(config: readonly ConfigOption[], full: boolean): ConfigOption[] {
+/** Recognizes the permission flag the session router located in OMP's top-level help. */
+export function offersOmpFullAccess(meta: unknown): boolean {
+  return (
+    (meta as Record<string, unknown> | null | undefined)?.[SESSION_FLAG_META] ===
+    '--approval-mode=yolo'
+  )
+}
+
+/** Adds the process-backed selection to the harness's own modes. */
+export function withFullAccess(
+  config: readonly ConfigOption[],
+  mode: ProcessAccessMode,
+  full: boolean,
+): ConfigOption[] {
   return config.map((option) => {
     if (option.id !== MODE_OPTION || option.type !== 'select') return option
-    const choices = (option.choices ?? []).filter((choice) => choice.value !== FULL_ACCESS)
+    const choices = (option.choices ?? []).filter((choice) => choice.value !== mode)
     choices.push({
-      value: FULL_ACCESS,
+      value: mode,
       name: t('antigravity.mode.fullAccess.name'),
-      description: t('antigravity.mode.fullAccess.description'),
+      description:
+        mode === OMP_FULL_ACCESS
+          ? t('omp.fullAccessDescription')
+          : t('antigravity.mode.fullAccess.description'),
     })
-    return { ...option, choices, ...(full ? { value: FULL_ACCESS } : {}) }
+    const value = full ? mode : option.value === mode ? HELD_MODE : option.value
+    return { ...option, choices, value }
   })
 }
 

@@ -86,15 +86,18 @@ import {
   plansAgy,
   planWrite,
 } from './agy-plan'
+import { OMP_FULL_ACCESS } from '@shared/agents'
 import {
   FULL_ACCESS,
   HELD_MODE,
   SESSION_FLAG_META,
   lacks,
   offersFullAccess,
+  offersOmpFullAccess,
   restoreOrder,
+  type ProcessAccessMode,
   withFullAccess,
-} from './agy-access'
+} from './process-access'
 import { AgyCommands } from './agy-commands'
 import { systemPromptMeta, takesSystemPromptAppend } from './agy-prompt'
 import { AGY_ELICITATION, askInCard, asksQuestions, OpenAsks } from './agy-questions'
@@ -303,8 +306,9 @@ interface AgyPlans {
   last: string | null
 }
 
-/** An agy session as it was opened, to start its process again with or without agy's flag. */
-interface AgyAccess {
+/** A session with process-scoped approval, whose process can be replaced without losing its ID. */
+interface ProcessAccess {
+  mode: ProcessAccessMode
   cwd: string
   options: SessionOptions
   /** Its process runs with the flag. */
@@ -380,6 +384,7 @@ export function mcpServers(servers: readonly McpServer[] | undefined): AcpMcpSer
   })
 }
 
+/** Connects an ACP harness and coordinates session process changes that ACP modes cannot express. */
 export class AcpConnection implements AgentConnection {
   private readonly connection: ClientConnection
   private readonly targets = new Map<string, SessionTarget>()
@@ -410,12 +415,12 @@ export class AcpConnection implements AgentConnection {
   private readonly agyPlans = new Map<string, AgyPlans>()
   /** The mode each agy session was in before it entered Plan mode, which a plan builds in. */
   private readonly agyBuildModes = new Map<string, string>()
-  /** agy offers full access, once `initialize` has answered. */
-  private fullAccess = false
+  /** The mode backed by a per-session process flag, as confirmed during initialization. */
+  private accessMode: ProcessAccessMode | null = null
   /** agy takes a system prompt addition for a new session, once `initialize` has answered. */
   private appendsSystemPrompt = false
-  /** agy's sessions while it offers full access. */
-  private readonly agyAccess = new Map<string, AgyAccess>()
+  /** Session processes that can be restarted to switch approvals. */
+  private readonly processAccess = new Map<string, ProcessAccess>()
   /** The prompts of each agy turn running, for an agy that takes a message into one. */
   private readonly chains = new Map<string, PromptChain>()
   /** agy's commands, by session: the turn's, and those that outlived theirs. */
@@ -798,7 +803,16 @@ export class AcpConnection implements AgentConnection {
       raw: init.agentCapabilities ?? null,
     }
     this.version = result.version
-    this.fullAccess = this.agy && offersFullAccess(result.version, init._meta)
+    this.accessMode = null
+    if (this.agy && offersFullAccess(result.version, init._meta)) {
+      this.accessMode = FULL_ACCESS
+    } else if (
+      this.hooks.agentId === 'omp' &&
+      result.capabilities.resumeSession &&
+      offersOmpFullAccess(init._meta)
+    ) {
+      this.accessMode = OMP_FULL_ACCESS
+    }
     this.appendsSystemPrompt = this.agy && takesSystemPromptAppend(result.version, caps)
     this.naming = mcpNaming(init.agentInfo)
     this.removal = hiddenRemoval(this.hooks.agentId, result.capabilities, result.version)
@@ -854,6 +868,7 @@ export class AcpConnection implements AgentConnection {
     return sessionMeta(this.hooks.agentId, options)
   }
 
+  /** Opens the session with its requested process policy before exposing its modes. */
   async newSession(cwd: string, options: SessionOptions = {}): Promise<OpenedSession> {
     const started = this.meta(options)
     const meta =
@@ -870,16 +885,27 @@ export class AcpConnection implements AgentConnection {
         }),
       )
     }
-    let full = this.fullAccess && options.fullAccess === true && !options.hidden
+    let full = this.accessMode !== null && options.fullAccess === true && !options.hidden
     let response: Awaited<ReturnType<typeof open>>
     try {
       response = await open(full)
     } catch (error) {
       if (!full) throw error
       // Opened without the flag, the session enters full access by a restart as its mode is set.
-      this.hooks.log('warn', `agy did not start with full access: ${(error as Error).message}`)
+      this.hooks.log(
+        'warn',
+        `${this.hooks.agentId} did not start with full access: ${(error as Error).message}`,
+      )
       full = false
       response = await open(false)
+    }
+    const config = this.config(response.configOptions, response.modes)
+    if (full && this.accessMode === OMP_FULL_ACCESS && currentMode(config) !== HELD_MODE) {
+      await this.closeSession(response.sessionId)
+      throw new AgentRequestError(
+        'agent_error',
+        'OMP did not open in Default mode with Full access',
+      )
     }
     this.readPlan(response._meta)
     this.allowWithoutAsking(response.sessionId, options)
@@ -887,13 +913,7 @@ export class AcpConnection implements AgentConnection {
     else this.openedAgy(response.sessionId, cwd, options)
     return {
       sessionId: response.sessionId,
-      config: this.opened(
-        response.sessionId,
-        cwd,
-        options,
-        this.config(response.configOptions, response.modes),
-        full,
-      ),
+      config: this.opened(response.sessionId, cwd, options, config, full),
     }
   }
 
@@ -984,7 +1004,12 @@ export class AcpConnection implements AgentConnection {
     this.allowWithoutAsking(response.sessionId, options)
     return {
       sessionId: response.sessionId,
-      config: this.config(response.configOptions, response.modes),
+      config: this.opened(
+        response.sessionId,
+        cwd,
+        options,
+        this.config(response.configOptions, response.modes),
+      ),
     }
   }
 
@@ -1002,7 +1027,7 @@ export class AcpConnection implements AgentConnection {
 
   private forgetSession(sessionId: string): void {
     this.autoAllowed.delete(sessionId)
-    this.agyAccess.delete(sessionId)
+    this.processAccess.delete(sessionId)
     this.agyCommands.delete(sessionId)
     this.agyOpened.delete(sessionId)
     this.subagentParents.delete(sessionId)
@@ -1035,7 +1060,7 @@ export class AcpConnection implements AgentConnection {
     if (this.unprompted.has(sessionId)) {
       throw new Error(`${this.hooks.name ?? 'The agent'}'s hidden sessions are never prompted`)
     }
-    await this.agyAccess.get(sessionId)?.restarting
+    await this.processAccess.get(sessionId)?.restarting
     const planning = this.agy && plansAgy(this.version) && this.targets.has(sessionId)
     if (planning) {
       const plans = this.agyPlans.get(sessionId)
@@ -1324,7 +1349,7 @@ export class AcpConnection implements AgentConnection {
     optionId: string,
     value: string | boolean,
   ): Promise<ConfigOption[]> {
-    const access = this.agyAccess.get(sessionId)
+    const access = this.processAccess.get(sessionId)
     if (access) {
       await access.restarting
       if (optionId === MODE_OPTION && typeof value === 'string') {
@@ -1339,7 +1364,7 @@ export class AcpConnection implements AgentConnection {
     }
     const config = await this.requestConfig(sessionId, optionId, value)
     if (!access) return config
-    access.config = withFullAccess(config, access.full)
+    access.config = withFullAccess(config, access.mode, access.full)
     return access.config
   }
 
@@ -1359,11 +1384,11 @@ export class AcpConnection implements AgentConnection {
     return this.config(response.configOptions, null)
   }
 
-  // agy's full access.
+  // Full access backed by a session's process.
 
   /**
-   * Notes an agy session that was just opened, its process started with the flag when `full`, and
-   * returns its options with Full access among them.
+   * Records the ordinary or flagged process behind the session and exposes its Full access option.
+   * Only the ACP config-option API can carry this host-defined choice.
    */
   private opened(
     sessionId: string,
@@ -1372,9 +1397,13 @@ export class AcpConnection implements AgentConnection {
     config: ConfigOption[],
     full = false,
   ): ConfigOption[] {
-    if (!this.fullAccess) return config
-    const shown = withFullAccess(config, full)
-    this.agyAccess.set(sessionId, {
+    const mode = this.accessMode
+    if (!mode || !config.some((option) => option.id === MODE_OPTION && option.type === 'select')) {
+      return config
+    }
+    const shown = withFullAccess(config, mode, full)
+    this.processAccess.set(sessionId, {
+      mode,
       cwd,
       options,
       full,
@@ -1385,13 +1414,17 @@ export class AcpConnection implements AgentConnection {
     return shown
   }
 
-  /** What a session update sets of agy's options, Full access among them and chosen while on. */
+  /** Keeps the displayed access mode tied to the process the host actually started. */
   private withAccess(sessionId: string, out: MapperOutput): MapperOutput {
-    const access = this.agyAccess.get(sessionId)
+    const access = this.processAccess.get(sessionId)
     if (!access) return out
     for (const patch of out.patches) {
       if (patch.op !== 'session.update' || !patch.changes.config) continue
-      access.config = withFullAccess(patch.changes.config, access.full)
+      if (access.mode === OMP_FULL_ACCESS && access.restarting) {
+        delete patch.changes.config
+        continue
+      }
+      access.config = withFullAccess(patch.changes.config, access.mode, access.full)
       patch.changes.config = access.config
     }
     return out
@@ -1400,14 +1433,17 @@ export class AcpConnection implements AgentConnection {
   /**
    * A mode chosen in a session that offers full access: entering or leaving it restarts the
    * session's process, at once between turns and once the turn ends during one. Null for any
-   * other mode, which agy sets itself, and which replaces a restart still waiting.
+   * other mode, which the harness sets itself and which replaces a restart still waiting.
    */
   private async switchAccess(
     sessionId: string,
-    access: AgyAccess,
+    access: ProcessAccess,
     mode: string,
   ): Promise<ConfigOption[] | null> {
-    const full = mode === FULL_ACCESS
+    const full = mode === access.mode
+    if (full && access.options.hidden) {
+      throw new AgentRequestError('agent_error', 'Hidden sessions cannot enter Full access')
+    }
     if (full === access.full) {
       access.pending = null
       return full ? access.config : null
@@ -1418,7 +1454,7 @@ export class AcpConnection implements AgentConnection {
       return access.config
     }
     access.pending = null
-    return this.restartAgy(sessionId, access, full, mode)
+    return this.restartAccess(sessionId, access, full, mode)
   }
 
   /**
@@ -1426,21 +1462,24 @@ export class AcpConnection implements AgentConnection {
    * the thread.
    */
   private async switchPending(sessionId: string): Promise<void> {
-    const access = this.agyAccess.get(sessionId)
+    const access = this.processAccess.get(sessionId)
     const mode = access?.pending
     if (!access || !mode || this.prompting.has(sessionId) || this.runsCommands(sessionId)) return
     access.pending = null
-    const full = mode === FULL_ACCESS
+    const full = mode === access.mode
     if (full === access.full || this.isClosed) return
     try {
-      const config = await this.restartAgy(sessionId, access, full, mode)
+      const config = await this.restartAccess(sessionId, access, full, mode)
       this.targets.get(sessionId)?.apply({
         patches: [{ op: 'session.update', changes: { config } }],
         effects: [],
       })
     } catch (error) {
       const message = (error as Error).message
-      this.hooks.log('warn', `Could not switch agy session ${sessionId} to ${mode}: ${message}`)
+      this.hooks.log(
+        'warn',
+        `Could not switch ${this.hooks.agentId} session ${sessionId} to ${mode}: ${message}`,
+      )
       const target = this.targets.get(sessionId)
       if (!target) return
       const ctx = target.context()
@@ -1460,26 +1499,45 @@ export class AcpConnection implements AgentConnection {
   }
 
   /**
-   * Starts the session's process again, with agy's flag for full access or without it in `mode`,
-   * and sets the session's values again. A failure starts it again as it was before it throws.
+   * Replaces only this session's process, restoring its settings before reporting a successful
+   * switch. On failure it tries to restore the previous process and mode.
    */
-  private async restartAgy(
+  private async restartAccess(
     sessionId: string,
-    access: AgyAccess,
+    access: ProcessAccess,
     full: boolean,
     mode: string,
   ): Promise<ConfigOption[]> {
     const before = { full: access.full, config: access.config }
     const was = currentMode(before.config)
-    const run = this.resumeAgy(sessionId, access, full, mode, before.config).catch(
+    const target = this.targets.get(sessionId)
+    // OMP extensions can use host tools as the new process opens. Hide the old grant first.
+    if (access.mode === OMP_FULL_ACCESS && before.full) {
+      target?.apply({
+        patches: [
+          {
+            op: 'session.update',
+            changes: { config: withFullAccess(before.config, access.mode, false) },
+          },
+        ],
+        effects: [],
+      })
+    }
+    const run = this.resumeAccess(sessionId, access, full, mode, before.config).catch(
       async (error: unknown) => {
-        await this.resumeAgy(
+        const restored = await this.resumeAccess(
           sessionId,
           access,
           before.full,
-          was === null || was === FULL_ACCESS ? HELD_MODE : was,
+          was === null || was === access.mode ? HELD_MODE : was,
           before.config,
-        ).catch(() => {})
+        ).catch(() => null)
+        if (access.mode === OMP_FULL_ACCESS && restored) {
+          target?.apply({
+            patches: [{ op: 'session.update', changes: { config: restored } }],
+            effects: [],
+          })
+        }
         throw this.toError(error)
       },
     )
@@ -1495,9 +1553,10 @@ export class AcpConnection implements AgentConnection {
     }
   }
 
-  private async resumeAgy(
+  /** Resumes the same session ID with its original workspace, servers and selected options. */
+  private async resumeAccess(
     sessionId: string,
-    access: AgyAccess,
+    access: ProcessAccess,
     full: boolean,
     mode: string,
     values: readonly ConfigOption[],
@@ -1509,7 +1568,7 @@ export class AcpConnection implements AgentConnection {
       mcpServers: mcpServers(access.options.mcpServers),
       ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
     })
-    access.full = full
+    if (access.mode === FULL_ACCESS) access.full = full
     this.subagents?.restarted(sessionId)
     this.readPlan(response._meta)
     this.allowWithoutAsking(sessionId, access.options)
@@ -1521,7 +1580,7 @@ export class AcpConnection implements AgentConnection {
       } catch (error) {
         this.hooks.log(
           'warn',
-          `agy session ${sessionId} kept ${option.id} after a restart: ${(error as Error).message}`,
+          `${this.hooks.agentId} session ${sessionId} kept ${option.id} after a restart: ${(error as Error).message}`,
         )
       }
     }
@@ -1529,7 +1588,11 @@ export class AcpConnection implements AgentConnection {
     if (currentMode(config) !== wanted) {
       config = await this.requestConfig(sessionId, MODE_OPTION, wanted)
     }
-    access.config = withFullAccess(config, full)
+    if (access.mode === OMP_FULL_ACCESS && currentMode(config) !== wanted) {
+      throw new AgentRequestError('agent_error', `OMP did not switch to ${wanted}`)
+    }
+    access.full = full
+    access.config = withFullAccess(config, access.mode, full)
     return access.config
   }
 

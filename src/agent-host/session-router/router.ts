@@ -93,6 +93,8 @@ function quoteCmd(arg: string): string {
 const FOLDER_PER_SESSION = '--folder-per-session'
 /** The router's flag naming the flag a session's child may start with. */
 const SESSION_FLAG = '--session-flag='
+const SESSION_DEFAULT_FLAG = '--session-default-flag='
+const ROOT_FLAG_HELP = '--root-flag-help'
 // Where `initialize`'s answer names the session flag the program lists, and where `session/new`,
 // `session/load` and `session/resume` ask for it, as `SESSION_FLAG_META` in the host's connection.
 const SESSION_FLAG_META = 'sh.kettu/session-flag'
@@ -205,12 +207,15 @@ function waitFor(check: () => boolean, ms: number): Promise<boolean> {
   })
 }
 
+/** Gives each ACP session its own process and routes requests to the process that owns it. */
 export class SessionRouter {
   private readonly childCommand: string
   private readonly childArgs: string[]
   private readonly folderPerSession: boolean
   /** The flag a session's child may start with, once the program's help lists it. */
   private readonly sessionFlag: string | null
+  private readonly sessionDefaultFlag: string | null
+  private readonly rootFlagHelp: boolean
   private listed: Promise<boolean> | null = null
   private readonly children = new Set<Child>()
   /** Each live session's child, by the session id it opened. */
@@ -228,12 +233,19 @@ export class SessionRouter {
   constructor(
     command: string,
     args: string[],
-    options: { folderPerSession?: boolean; sessionFlag?: string | null } = {},
+    options: {
+      folderPerSession?: boolean
+      sessionFlag?: string | null
+      sessionDefaultFlag?: string | null
+      rootFlagHelp?: boolean
+    } = {},
   ) {
     this.childCommand = command
     this.childArgs = args
     this.folderPerSession = options.folderPerSession ?? false
     this.sessionFlag = options.sessionFlag ?? null
+    this.sessionDefaultFlag = options.sessionDefaultFlag ?? null
+    this.rootFlagHelp = options.rootFlagHelp ?? false
   }
 
   start(): void {
@@ -257,6 +269,7 @@ export class SessionRouter {
     }
   }
 
+  /** Handles process lifecycle operations locally and forwards requests to the owning child. */
   private async hostRequest(id: JsonRpcId, method: string, params: unknown): Promise<void> {
     try {
       if (method === 'initialize') {
@@ -272,7 +285,9 @@ export class SessionRouter {
           withFlag(withClose(answer.result), listed ? this.sessionFlag : null),
         )
       }
-      if (method === 'session/new') return await this.newSession(id, params)
+      if (method === 'session/new' || method === 'session/fork') {
+        return await this.openSession(id, method, params)
+      }
       if (method === 'session/load' || method === 'session/resume') {
         return await this.loadSession(id, method, params)
       }
@@ -330,12 +345,23 @@ export class SessionRouter {
     for (const [id, host] of this.guests) if (host === child) this.guests.delete(id)
   }
 
-  private async newSession(id: JsonRpcId, params: unknown): Promise<void> {
+  /**
+   * Opens a new session in its own child. A fork reads the source's saved thread and starts with
+   * ordinary permissions, even while the source runs in a child with Full access.
+   */
+  private async openSession(
+    id: JsonRpcId,
+    method: 'session/new' | 'session/fork',
+    params: unknown,
+  ): Promise<void> {
     let child: Child | null = null
     try {
       const flag = takeFlag(params)
-      child = await this.startSessionChild(params, await this.flagFor(flag.flagged))
-      const answer = await this.request(child, 'session/new', flag.params)
+      child = await this.startSessionChild(
+        params,
+        await this.flagFor(method === 'session/new' && flag.flagged),
+      )
+      const answer = await this.request(child, method, flag.params)
       if (answer.error) {
         this.endChild(child)
         return this.sendError(id, answer.error)
@@ -345,7 +371,7 @@ export class SessionRouter {
         this.endChild(child)
         return this.sendError(id, {
           code: INTERNAL_ERROR,
-          message: 'session/new answered with no session id',
+          message: `${method} answered with no session id`,
         })
       }
       this.sessions.set(sessionId, child)
@@ -461,9 +487,13 @@ export class SessionRouter {
     }
   }
 
-  /** The session flag, as the words a child that asked for it adds; it throws when not listed. */
+  /** Selects the child's approval flag, including the pinned ordinary policy when supported. */
   private async flagFor(flagged: boolean): Promise<string[]> {
-    if (!flagged) return []
+    if (!flagged) {
+      return this.sessionDefaultFlag !== null && (await this.flagListed())
+        ? [this.sessionDefaultFlag]
+        : []
+    }
     if (this.sessionFlag === null || !(await this.flagListed())) {
       throw new RouterError('The agent has no session flag to start with', {
         reason: 'no_session_flag',
@@ -477,7 +507,8 @@ export class SessionRouter {
     const flag = this.sessionFlag
     if (flag === null) return Promise.resolve(false)
     this.listed ??= new Promise((resolve) => {
-      const { command, args } = this.spawnWords(this.childCommand, [...this.childArgs, '--help'])
+      const helpArgs = this.rootFlagHelp ? ['--help'] : [...this.childArgs, '--help']
+      const { command, args } = this.spawnWords(this.childCommand, helpArgs)
       let help = ''
       let proc: ChildProcess
       try {
@@ -503,7 +534,7 @@ export class SessionRouter {
       })
       proc.on('close', () => {
         clearTimeout(timer)
-        resolve(listsFlag(help, flag))
+        resolve(listsFlag(help, flag.split('=', 1)[0]))
       })
     })
     return this.listed
@@ -749,9 +780,14 @@ function parse(line: string): RpcMessage | null {
 const words = process.argv.slice(2)
 let folderPerSession = false
 let sessionFlag: string | null = null
+let sessionDefaultFlag: string | null = null
+let rootFlagHelp = false
 for (;;) {
   if (words[0] === FOLDER_PER_SESSION) folderPerSession = true
   else if (words[0]?.startsWith(SESSION_FLAG)) sessionFlag = words[0].slice(SESSION_FLAG.length)
+  else if (words[0]?.startsWith(SESSION_DEFAULT_FLAG)) {
+    sessionDefaultFlag = words[0].slice(SESSION_DEFAULT_FLAG.length)
+  } else if (words[0] === ROOT_FLAG_HELP) rootFlagHelp = true
   else break
   words.shift()
 }
@@ -762,4 +798,9 @@ if (!command || sessionFlag === '') {
   )
   process.exit(1)
 }
-new SessionRouter(command, words.slice(1), { folderPerSession, sessionFlag }).start()
+new SessionRouter(command, words.slice(1), {
+  folderPerSession,
+  sessionFlag,
+  sessionDefaultFlag,
+  rootFlagHelp,
+}).start()

@@ -632,6 +632,9 @@
     "unknownTool": "未知工具内容",
     "toolCall": "工具调用"
   },
+  "omp": {
+    "fullAccessDescription": "自动批准 OMP 工具调用，显式要求确认或禁止的规则仍然生效。同时授予 Kettu 的完全访问权限。"
+  },
   "antigravity": {
     "plan": {
       "title": "计划"

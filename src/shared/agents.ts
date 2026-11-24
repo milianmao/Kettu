@@ -174,10 +174,12 @@ export const START_MODE_HARNESSES: readonly HarnessId[] = [
   'codex',
   'deepseek',
   'antigravity',
+  'omp',
 ]
 
 /** Google Antigravity's full access, Kettu's mode for agy's `--dangerously-skip-permissions`. */
 export const ANTIGRAVITY_FULL_ACCESS = 'dangerously-skip-permissions'
+export const OMP_FULL_ACCESS = 'omp-full-access'
 
 /** The permission modes that never ask. */
 export const FULL_ACCESS_MODES: readonly string[] = [
@@ -185,6 +187,7 @@ export const FULL_ACCESS_MODES: readonly string[] = [
   'agent-full-access',
   'danger-full-access',
   ANTIGRAVITY_FULL_ACCESS,
+  OMP_FULL_ACCESS,
 ]
 
 export function isFullAccessMode(value: string | undefined): boolean {

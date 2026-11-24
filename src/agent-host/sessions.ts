@@ -12557,7 +12557,7 @@ function replacedNotice(
   }
 }
 
-/** The id of the permission mode option of a Claude Code or Codex agent; null for any other. */
+/** The permission option of a harness whose modes Kettu can rank. */
 function modeOptionId(agentId: AgentId): string | null {
   switch (harnessOf(agentId)) {
     case 'claude-code':
@@ -12568,6 +12568,8 @@ function modeOptionId(agentId: AgentId): string | null {
       return DSH_CONFIG.mode
     case 'antigravity':
       return AGY_MODE_OPTION
+    case 'omp':
+      return 'mode'
     default:
       return null
   }

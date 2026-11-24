@@ -3,7 +3,7 @@
 // starter's rank and the rank of the mode its agent would start in, never to full access, so a
 // session cannot do through one it starts what it could not do itself without asking.
 
-import { ANTIGRAVITY_FULL_ACCESS, type HarnessId } from '@shared/agents'
+import { ANTIGRAVITY_FULL_ACCESS, OMP_FULL_ACCESS, type HarnessId } from '@shared/agents'
 import { availableModes, modeDescription, modeName } from './claude/config'
 import type { PermissionMode } from './claude/sdk'
 import { DEFAULT_MODE as CODEX_DEFAULT, MODES as CODEX_MODES, type ModeId } from './codex/config'
@@ -21,7 +21,7 @@ export type ModeRank = 1 | 2 | 3 | 4
 /** The widest rank a started session gets: full access never. */
 export const STARTED_MAX: ModeRank = 3
 
-export type RankedHarness = 'claude-code' | 'codex' | 'deepseek' | 'antigravity'
+export type RankedHarness = 'claude-code' | 'codex' | 'deepseek' | 'antigravity' | 'omp'
 
 // agy's own modes, then Kettu's full access over its `--dangerously-skip-permissions`.
 const AGY_MODES = ['default', 'accept-edits', 'auto', 'plan', ANTIGRAVITY_FULL_ACCESS] as const
@@ -33,6 +33,9 @@ const AGY_KEYS: Record<AgyMode, 'default' | 'acceptEdits' | 'auto' | 'plan' | 'f
   plan: 'plan',
   [ANTIGRAVITY_FULL_ACCESS]: 'fullAccess',
 }
+
+// OMP's ordinary process pins always-ask, even if its project settings normally auto-approve.
+const OMP_MODES = ['default', 'plan', OMP_FULL_ACCESS] as const
 
 const RANKS: Record<RankedHarness, Readonly<Record<string, ModeRank>>> = {
   'claude-code': {
@@ -62,6 +65,10 @@ const RANKS: Record<RankedHarness, Readonly<Record<string, ModeRank>>> = {
     auto: 3,
     [ANTIGRAVITY_FULL_ACCESS]: 4,
   } satisfies Record<AgyMode, ModeRank>,
+  omp: { default: 1, plan: 1, [OMP_FULL_ACCESS]: 4 } satisfies Record<
+    (typeof OMP_MODES)[number],
+    ModeRank
+  >,
 }
 
 // The modes each harness's mode menu offers, narrow to wide.
@@ -70,6 +77,7 @@ const OFFERED: Record<RankedHarness, readonly string[]> = {
   codex: CODEX_MODES.map((mode) => mode.id),
   deepseek: DSH_MODES,
   antigravity: AGY_MODES,
+  omp: OMP_MODES,
 }
 
 // A plan mode ends its turn waiting for the user to approve the plan.
@@ -142,6 +150,7 @@ export function defaultMode(harness: RankedHarness): string | null {
     case 'deepseek':
       return DSH_DEFAULT
     case 'antigravity':
+    case 'omp':
       return 'default'
     case 'claude-code':
       return null
@@ -176,6 +185,16 @@ export function modeLabel(harness: RankedHarness, mode: string): ModeLabel {
         description: tEnglish(`dsh.mode.${key}Description`),
       }
     }
+    case 'omp':
+      return mode === OMP_FULL_ACCESS
+        ? {
+            name: tEnglish('antigravity.mode.fullAccess.name'),
+            description: tEnglish('omp.fullAccessDescription'),
+          }
+        : {
+            name: mode === 'default' ? 'Default' : mode === 'plan' ? 'Plan' : mode,
+            description: '',
+          }
     case 'antigravity': {
       if (!Object.hasOwn(AGY_KEYS, mode)) return { name: mode, description: '' }
       const key = AGY_KEYS[mode as AgyMode]
