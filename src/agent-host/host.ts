@@ -140,6 +140,7 @@ import { Diagnostics } from './diagnostics'
 import { HostError, invalidParams, notFound } from './errors'
 import { setLocale, t, tSettings, tSettingsEnglish } from './i18n'
 import { FilesService } from './files'
+import { KnowledgeStore, type KnowledgeWorkerFactory } from './knowledge/store'
 import { MediaService } from './media'
 import { MemoryError, type MemoryErrorCode } from './memory/errors'
 import { MemoryService } from './memory/service'
@@ -353,6 +354,8 @@ export interface HostOptions {
   threadWorker?: ThreadWorkerFactory
   /** Starts the worker that owns the usage database; without it no usage is kept. */
   usageWorker?: UsageWorkerFactory
+  /** Starts the workers that own the code indexes; without it no code is searched. */
+  knowledgeWorker?: KnowledgeWorkerFactory
   usageTimings?: Partial<UsageTimings>
   /** The agents' log readers, for the manager; the worker has its own. */
   usageReaders?: readonly LogReader[]
@@ -476,6 +479,8 @@ export class AgentHost {
   readonly attachments: Attachments
   /** Every session's thread, read a page at a time, in a worker of its own. */
   readonly threads: ThreadStore | null
+  /** Every project's code index, each in a worker of its own, started when it is searched. */
+  private readonly knowledge: KnowledgeStore | null
   /** Kettu's record and the agents' logs, in a worker of its own. */
   readonly usage: UsageManager
   /** Every project's artifacts, kept in the thread database and the data folder. */
@@ -773,6 +778,16 @@ export class AgentHost {
           file: path.join(options.userDataPath, 'state', 'threads.db'),
           contentDir,
           createWorker: options.threadWorker,
+          log,
+        })
+      : null
+    this.knowledge = options.knowledgeWorker
+      ? new KnowledgeStore({
+          dataPath: path.join(options.userDataPath, 'knowledge'),
+          platform,
+          exec: this.execRunner.exec,
+          env: this.env,
+          createWorker: options.knowledgeWorker,
           log,
         })
       : null
@@ -1521,6 +1536,7 @@ export class AgentHost {
     void host.marketSkills.sync()
     host.sendFolders()
     void host.sessions.checkWorktrees()
+    void host.knowledge?.prune()
     host.usage.start()
     host.artifacts.start()
     host.idleRelease.start()
@@ -3011,6 +3027,7 @@ export class AgentHost {
         this.workflowSuggestions.flush(),
         this.threads?.close(),
         this.usage.close(),
+        this.knowledge?.close(),
       ])
       this.hub.closeAll()
       this.failBrowserCalls()

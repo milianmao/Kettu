@@ -60,6 +60,7 @@ import clineHostPath from '../agent-host/cline/cline-host?modulePath'
 import sessionRouterPath from '../agent-host/session-router/router?modulePath'
 import threadWorkerPath from '../agent-host/threads/worker?modulePath'
 import usageWorkerPath from '../agent-host/usage/worker?modulePath'
+import knowledgeWorkerPath from '../agent-host/knowledge/worker?modulePath'
 import { processControl, stopTrees, type ProcessId } from '../agent-host/process-tree'
 import { ContentCache } from './artifacts/content-cache'
 import { computerHostOptions } from './computer-use'
@@ -385,6 +386,7 @@ export class AgentHost {
           : join(app.getAppPath(), 'tools/fake-agent/main.ts'),
         threadWorkerPath,
         usageWorkerPath,
+        knowledgeWorkerPath,
         // The router runs on the user's Node.js, which cannot read inside app.asar.
         sessionRouterPath: unpackedPath(sessionRouterPath),
         clineHostPath,

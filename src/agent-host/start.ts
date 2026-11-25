@@ -14,6 +14,7 @@ import type { FromPort } from '@shared/port-rpc'
 import type { PortDevice } from '@shared/remote/device'
 import { createGitService } from './git'
 import { AgentHost } from './host'
+import { nodeKnowledgeWorker } from './knowledge/store'
 import { nodeThreadWorker } from './threads/store'
 import { nodeUsageWorker } from './usage/store'
 
@@ -69,6 +70,8 @@ export function startAgentHost(control: ControlChannel<MainToHost, HostToMain>):
         nodeThreadWorker(new Worker(message.threadWorkerPath, { workerData: data })),
       usageWorker: (file) =>
         nodeUsageWorker(new Worker(message.usageWorkerPath, { workerData: { file } })),
+      knowledgeWorker: (data) =>
+        nodeKnowledgeWorker(new Worker(message.knowledgeWorkerPath, { workerData: data })),
     })
     host.catch((error: unknown) => {
       // Without its state the host cannot run; main restarts it with backoff.
