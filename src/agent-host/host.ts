@@ -910,6 +910,11 @@ export class AgentHost {
         proposed: (sessionId, proposal) => this.sessions.memoryProposed(sessionId, proposal),
         agentOf: (sessionId) => this.sessions.sessionAgent(sessionId),
       },
+      knowledge: this.knowledge
+        ? {
+            search: (folder, query, opts) => this.knowledge!.search(folder, query, opts),
+          }
+        : undefined,
       wrote: (sessionId, write) => this.sessions.artifactWritten(sessionId, write),
       browserCall: (request, caller) => this.browserCall(request, caller),
       browserAccess: {

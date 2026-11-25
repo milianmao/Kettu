@@ -10,6 +10,7 @@ import { COMPUTER_TOOLS } from './computer/tools'
 import { DEVICE_TOOLS } from './devices/tools'
 import { MARKET_TOOLS } from './marketplace/publish-tools'
 import { MEMORY_TOOLS } from './memory/tools'
+import { KNOWLEDGE_TOOLS } from './knowledge/tools'
 import { PLAN_TOOLS } from './plan-tool'
 import { REPORT_TOOLS } from './report-tool'
 import { SESSION_TOOLS } from './session-tools'
@@ -24,6 +25,7 @@ const ALL: Tool[] = [
   ...DEVICE_TOOLS,
   ...MARKET_TOOLS,
   ...MEMORY_TOOLS,
+  ...KNOWLEDGE_TOOLS,
   ...PLAN_TOOLS,
   ...REPORT_TOOLS,
   ...SESSION_TOOLS,

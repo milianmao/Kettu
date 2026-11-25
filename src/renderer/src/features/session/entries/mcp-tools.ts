@@ -109,6 +109,7 @@ const TARGETS = {
   remember: ['title'],
   update_memory: ['title', 'id'],
   forget_memory: ['id'],
+  search_code: ['query'],
   marketplace_check: [{ path: 'path' }],
   marketplace_publish: [{ path: 'path' }],
   marketplace_mine: [],

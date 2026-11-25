@@ -207,6 +207,8 @@ export function serviceInstructions(flags: GuideFlags): string {
             'index and how to use it.',
         ]
       : []),
+    "Code: search_code searches the text of the files in this session's working directory, " +
+      'returning path, line and text; grep yourself when you need exact freshness.',
     ...(flags.market
       ? [
           "Marketplace: the marketplace_* tools publish the user's own skills, workflows, " +

@@ -100,19 +100,21 @@ function search(
   const current = scanner?.current() ?? index
   const files = current.find(words)
   const matches: CodeMatch[] = []
-  let capped = false
+  // One past the limit is gathered too, so an answer of exactly the limit can say nothing was
+  // left out; the gather breaks off only past it.
   for (const file of files) {
     if (glob !== undefined && !file.path.startsWith(glob)) continue
     for (const line of index.lineMatches(file.text, words)) {
-      if (matches.length > limit) {
-        capped = true
-        break
-      }
+      if (matches.length > limit) break
       matches.push({ path: file.path, line: line.line, text: line.text })
     }
-    if (capped) break
+    if (matches.length > limit) break
   }
-  return { matches: matches.slice(0, limit), capped, indexing: current.build() }
+  return {
+    matches: matches.slice(0, limit),
+    capped: matches.length > limit,
+    indexing: current.build(),
+  }
 }
 
 function nothing(): CodeSearchAnswer {

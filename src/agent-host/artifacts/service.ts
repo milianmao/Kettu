@@ -99,6 +99,12 @@ import {
   MemoryTools,
   type MemoryToolsDeps,
 } from '../memory/tools'
+import {
+  isKnowledgeToolName,
+  KNOWLEDGE_TOOLS,
+  KnowledgeTools,
+  type KnowledgeToolsDeps,
+} from '../knowledge/tools'
 import { artifactWrite, type ArtifactWrite } from './entries'
 import type { ArtifactData } from './runtime/data'
 import { DATA_TOOLS, DataTools, isDataToolName } from './runtime/data-tools'
@@ -140,6 +146,7 @@ const TOOL_GROUPS: ReadonlyMap<string, McpToolGroup> = new Map(
       [DEVICE_TOOLS, 'devices'],
       [TERMINAL_TOOLS, 'terminal'],
       [MEMORY_TOOLS, 'memory'],
+      [KNOWLEDGE_TOOLS, 'code'],
       [REPORT_TOOLS, 'reports'],
       [WORKFLOW_TOOLS, 'workflows'],
       [SETTINGS_TOOLS, 'settings'],
@@ -215,6 +222,8 @@ export interface ArtifactServiceDeps extends ArtifactToolsDeps {
   report: ReportToolsDeps
   /** Kettu's memory behind the memory tools, listed only while it is on; without it none. */
   memory?: MemoryToolsDeps
+  /** The code index behind the code search tool; without it the tool is not listed. */
+  knowledge?: KnowledgeToolsDeps
   /** Whether the agent's session `id` is a subagent that runs under a session of its own. */
   subagentCall?(process: AgentProcess, id: string): boolean
   /** The mobile devices behind the `device_*` tools; without them every call fails. */
@@ -338,6 +347,7 @@ export class ArtifactService {
   private readonly planTools: PlanTools
   private readonly reportTools: ReportTools
   private readonly memoryTools: MemoryTools | null
+  private readonly knowledgeTools: KnowledgeTools | null
   private readonly browserTools: BrowserTools
   private readonly deviceTools: DeviceTools | null
   private readonly terminalTools: TerminalTools | null
@@ -355,6 +365,7 @@ export class ArtifactService {
     this.planTools = new PlanTools(deps.plan)
     this.reportTools = new ReportTools(deps.report)
     this.memoryTools = deps.memory ? new MemoryTools(deps.memory) : null
+    this.knowledgeTools = deps.knowledge ? new KnowledgeTools(deps.knowledge) : null
     this.workflowTools = deps.workflow ? new WorkflowTools(deps.workflow) : null
     this.serviceTools = deps.computer ? [...SERVICE_TOOLS, ...COMPUTER_TOOLS] : SERVICE_TOOLS
     const browserCall = deps.browserCall
@@ -511,6 +522,7 @@ export class ArtifactService {
       guideTool(this.guideFlags),
       ...(this.terminalTools?.listed(this.serviceTools) ?? this.serviceTools),
       ...(this.memoryOn ? MEMORY_TOOLS : []),
+      ...(this.knowledgeTools ? KNOWLEDGE_TOOLS : []),
       ...(this.marketOn ? MARKET_TOOLS : []),
       ...(this.workflowTools?.listed(sessionId) ?? []),
       ...(this.deps.settings ? SETTINGS_TOOLS : []),
@@ -893,6 +905,14 @@ export class ArtifactService {
       // While memory is off they are not listed, and a call answers that it is off.
       try {
         return await this.memoryTools.call(caller, name, input)
+      } catch (error) {
+        this.deps.log('error', `${name} failed: ${(error as Error).message}`)
+        throw new McpError(ErrorCode.InternalError, `${name} failed: ${(error as Error).message}`)
+      }
+    }
+    if (this.knowledgeTools && isKnowledgeToolName(name)) {
+      try {
+        return await this.knowledgeTools.call(caller, name, input)
       } catch (error) {
         this.deps.log('error', `${name} failed: ${(error as Error).message}`)
         throw new McpError(ErrorCode.InternalError, `${name} failed: ${(error as Error).message}`)

@@ -164,6 +164,7 @@
     "remember": "Remember",
     "update_memory": "Update memory",
     "forget_memory": "Forget memory",
+    "search_code": "Search code",
     "marketplace_check": "Check before publishing",
     "marketplace_publish": "Publish to Marketplace",
     "marketplace_mine": "List published",
