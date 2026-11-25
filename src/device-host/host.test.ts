@@ -22,6 +22,11 @@ const fake = vi.hoisted(() => {
     shutdowns: [] as string[],
     /** The user boots the simulator between the host's listing and its own boot. */
     bootedMeanwhile: false,
+    /** While set, a boot does not finish; `inBoot` counts the boots waiting on it. */
+    booting: null as Promise<void> | null,
+    inBoot: 0,
+    /** The wait for a simulator's boot fails, as `simctl bootstatus` does when it times out. */
+    bootFails: false,
     /** The AVD each running emulator was started from. */
     avds: new Map<string, string>(),
     /** An AVD runs as `serial`, so adb lists the emulator in its place. */
@@ -90,6 +95,13 @@ vi.mock('./ios-simulator', () => ({
     if (!wasBooted) fake.boots.push(udid)
     return !wasBooted
   },
+  waitUntilBooted: async () => {
+    if (fake.booting) {
+      fake.inBoot += 1
+      await fake.booting
+    }
+    if (fake.bootFails) throw new Error('Command failed: simctl bootstatus')
+  },
   shutdownSimulator: async (_xcrun: string, udid: string) => {
     const device = fake.devices.find((found) => found.target === udid)
     if (device) device.state = 'shutdown'
@@ -126,6 +138,10 @@ vi.mock('./agent', () => {
 vi.mock('./android', () => ({
   bootEmulator: async (_emulator: string, _adb: string, avd: string) => {
     fake.boots.push(avd)
+    if (fake.booting) {
+      fake.inBoot += 1
+      await fake.booting
+    }
     fake.runEmulator(avd, 'emulator-5556')
     return 'emulator-5556'
   },
@@ -299,6 +315,9 @@ beforeEach(async () => {
   fake.boots = []
   fake.shutdowns = []
   fake.bootedMeanwhile = false
+  fake.booting = null
+  fake.inBoot = 0
+  fake.bootFails = false
 })
 
 afterEach(async () => {
@@ -611,6 +630,86 @@ describe('simulators the host booted', () => {
     await devices.close(SIMULATOR.id, 's1', false)
     expect(fake.shutdowns).toEqual([])
   })
+
+  /** Opens the simulator in `s1` with its boot held until the returned function lets it finish. */
+  async function openWhileBooting(devices: DeviceManager): Promise<{
+    opening: Promise<unknown>
+    booted(): void
+  }> {
+    let booted!: () => void
+    fake.booting = new Promise<void>((resolve) => (booted = resolve))
+    const opening = devices.open(SIMULATOR.id, 's1').catch((error: unknown) => error)
+    await vi.waitFor(() => expect(fake.inBoot).toBe(1))
+    return { opening, booted }
+  }
+
+  it('shuts one down when its tab closes while it boots', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.close(SIMULATOR.id, 's1', false)
+    expect(fake.shutdowns).toEqual([])
+
+    booted()
+    expect(((await opening) as DeviceError).data).toEqual({ reason: 'closed' })
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+    expect(devices.info(SIMULATOR.id)).toMatchObject({ sessionId: null, bootedByHost: false })
+    await restart(devices)
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+  })
+
+  it('lists one as booting until its boot is up, though simctl calls it booted before', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    expect(fake.devices.find((device) => device.id === SIMULATOR.id)!.state).toBe('booted')
+    await devices.list()
+    expect(devices.info(SIMULATOR.id)!.state).toBe('booting')
+
+    booted()
+    expect(await opening).toMatchObject({ state: 'booted', sessionId: 's1' })
+  })
+
+  it('shuts one down when the session holding it ends while it boots', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.endSessions(['s1'])
+    booted()
+    expect(await opening).toBeInstanceOf(DeviceError)
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+  })
+
+  it('shuts one down whose boot did not finish once its tab is closed, then or later', async () => {
+    fake.bootFails = true
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.close(SIMULATOR.id, 's1', false)
+    booted()
+    expect(await opening).toBeInstanceOf(DeviceError)
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+
+    fake.shutdowns = []
+    fake.devices.find((device) => device.id === SIMULATOR.id)!.state = 'shutdown'
+    await devices.list()
+    expect(await devices.open(SIMULATOR.id, 's1').catch((error: unknown) => error)).toBeInstanceOf(
+      DeviceError,
+    )
+    await devices.close(SIMULATOR.id, 's1', false)
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+  })
+
+  it('keeps one on that its tab opened again while it booted, until that tab closes', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.close(SIMULATOR.id, 's1', false)
+    const reopening = devices.open(SIMULATOR.id, 's1')
+    booted()
+    for (const open of [opening, reopening]) {
+      expect(await open).toMatchObject({ sessionId: 's1', bootedByHost: true })
+    }
+    expect(fake.shutdowns).toEqual([])
+
+    await devices.close(SIMULATOR.id, 's1', false)
+    expect(fake.shutdowns).toEqual([SIMULATOR.target])
+  })
 })
 
 /** The device host as main runs it, its agent calls in and a port per client. */
@@ -742,6 +841,72 @@ describe('emulators the host booted', () => {
     devices = await restart(devices)
 
     await devices.close(started.id, 's1', false)
+    expect(fake.shutdowns).toEqual([])
+  })
+
+  const SERIAL = 'emulator-5556'
+
+  /** Opens the AVD in `s1` with its boot held until the returned function lets it finish. */
+  async function openWhileBooting(devices: DeviceManager): Promise<{
+    opening: Promise<unknown>
+    booted(): void
+  }> {
+    let booted!: () => void
+    fake.booting = new Promise<void>((resolve) => (booted = resolve))
+    const opening = devices.open(AVD.id, 's1').catch((error: unknown) => error)
+    await vi.waitFor(() => expect(fake.inBoot).toBe(1))
+    return { opening, booted }
+  }
+
+  it('shuts one down when its tab closes while it boots', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.close(AVD.id, 's1', false)
+    expect(fake.shutdowns).toEqual([])
+
+    booted()
+    expect(((await opening) as DeviceError).data).toEqual({ reason: 'closed' })
+    expect(fake.shutdowns).toEqual([SERIAL])
+    expect(devices.holder(`android:${SERIAL}`)).toBeNull()
+    expect(devices.info(AVD.id)).toMatchObject({ sessionId: null, state: 'shutdown' })
+  })
+
+  it('shuts one down when the session holding it ends while it boots', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.endSessions(['s1'])
+    booted()
+    expect(((await opening) as DeviceError).data).toEqual({ reason: 'closed' })
+    expect(fake.shutdowns).toEqual([SERIAL])
+    expect(devices.holder(`android:${SERIAL}`)).toBeNull()
+  })
+
+  it('keeps one on whose session still holds it when it is up, under its serial', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    booted()
+    expect(await opening).toMatchObject({
+      id: `android:${SERIAL}`,
+      sessionId: 's1',
+      bootedByHost: true,
+    })
+    expect(devices.holder(AVD.id)).toBeNull()
+    expect(fake.shutdowns).toEqual([])
+
+    await devices.close(`android:${SERIAL}`, 's1', false)
+    expect(fake.shutdowns).toEqual([SERIAL])
+  })
+
+  it('boots one once for a tab that opened it again while it booted', async () => {
+    const devices = manager()
+    const { opening, booted } = await openWhileBooting(devices)
+    await devices.close(AVD.id, 's1', false)
+    const reopening = devices.open(AVD.id, 's1')
+    booted()
+    for (const open of [opening, reopening]) {
+      expect(await open).toMatchObject({ id: `android:${SERIAL}`, sessionId: 's1' })
+    }
+    expect(fake.boots).toEqual([AVD.target])
     expect(fake.shutdowns).toEqual([])
   })
 })

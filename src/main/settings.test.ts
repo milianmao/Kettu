@@ -2,10 +2,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { splitSettingsPatch } from '@shared/remote/host-admin'
+import { hostSettingsPart, splitSettingsPatch, withHostSettings } from '@shared/remote/host-admin'
 import { DEFAULT_SETTINGS } from '@shared/settings'
 import { SettingsStore } from './settings'
-import { hostSettings, mergeSettings, validateSettingsPatch } from './settings-schema'
+import {
+  effectiveDirect,
+  hostSettings,
+  mergeSettings,
+  validateSettingsPatch,
+  withOwnRelay,
+} from './settings-schema'
 
 let dir: string
 
@@ -286,6 +292,20 @@ describe('letting agents type passwords', () => {
   })
 })
 
+describe('continuing after a plan limit resets', () => {
+  it('is kept by the host, so a client changes the value its sessions follow', () => {
+    expect(splitSettingsPatch({ general: { continueAfterLimit: false } })).toEqual({
+      host: { general: { continueAfterLimit: false } },
+      client: null,
+    })
+    const host = mergeSettings(DEFAULT_SETTINGS, { general: { continueAfterLimit: false } })
+    expect(hostSettingsPart(host).general.continueAfterLimit).toBe(false)
+    const shown = withHostSettings(structuredClone(DEFAULT_SETTINGS), hostSettingsPart(host))
+    expect(shown.general.continueAfterLimit).toBe(false)
+    expect(hostSettings(host, 'en').continueAfterLimit).toBe(false)
+  })
+})
+
 describe('when idle sessions let their agent go', () => {
   it('releases by memory until the user picks, with Custom at 5 and 30 minutes and no limit', async () => {
     const store = await SettingsStore.load(dir)
@@ -358,6 +378,139 @@ describe('when idle sessions let their agent go', () => {
     })
     await save({ version: 1, idleSessions: 'never' })
     expect((await SettingsStore.load(dir)).get().idleSessions.release).toBe('auto')
+  })
+})
+
+describe("a plugin's items in a patch", () => {
+  const skill = {
+    id: 'plugin:p0123456789ab:review',
+    name: 'review',
+    description: 'Reviews a change.',
+    source: 'plugin',
+    origin: 'review-kit',
+    version: '1.0.0',
+    agents: 'all',
+    on: true,
+  }
+  const server = {
+    id: 'plugin:p0123456789ab:tracker',
+    name: 'tracker',
+    title: 'tracker',
+    source: 'plugin',
+    version: null,
+    spec: { type: 'stdio', command: '/data/plugins/bin/server', args: [], env: [] },
+    agents: 'all',
+    on: true,
+  }
+
+  it('keeps a skill and a server by the plugin that brought them', () => {
+    expect(validateSettingsPatch({ marketplace: { skillsEdit: { put: [skill] } } })).toEqual({
+      marketplace: { skillsEdit: { put: [skill] } },
+    })
+    expect(validateSettingsPatch({ marketplace: { mcpEdit: { put: [server] } } })).toEqual({
+      marketplace: { mcpEdit: { put: [server] } },
+    })
+  })
+
+  it('refuses an id that names no plugin, and an origin that is no plugin name', () => {
+    for (const id of ['plugin:review', 'plugin:p01:review', 'plugin:p0123456789ab:../x', 'x']) {
+      expect(() => validateSettingsPatch({ marketplace: { skills: [{ ...skill, id }] } })).toThrow()
+      expect(() => validateSettingsPatch({ marketplace: { mcp: [{ ...server, id }] } })).toThrow()
+    }
+    expect(() =>
+      validateSettingsPatch({ marketplace: { skills: [{ ...skill, origin: '/etc/passwd' }] } }),
+    ).toThrow()
+    expect(() =>
+      validateSettingsPatch({ marketplace: { skills: [{ ...skill, source: 'kettu' }] } }),
+    ).toThrow()
+  })
+})
+
+describe('removing what a plugin brought', () => {
+  const skill = {
+    id: 'plugin:p0123456789ab:review',
+    name: 'review',
+    description: 'Reviews a change.',
+    source: 'plugin' as const,
+    origin: 'review-kit',
+    version: '1.0.0',
+    agents: 'all' as const,
+    on: true,
+  }
+  const other = {
+    ...skill,
+    id: 'github:owner/repo',
+    name: 'other',
+    source: 'github' as const,
+    origin: 'https://github.com/owner/repo',
+  }
+  const base = mergeSettings(
+    DEFAULT_SETTINGS,
+    {
+      marketplace: { skills: [skill, other] as never },
+    },
+    { plugins: true },
+  )
+
+  it('refuses a remove, or a list without it, from anyone but the plugin service', () => {
+    const remove = validateSettingsPatch({ marketplace: { skillsEdit: { remove: [skill.id] } } })
+    expect(() => mergeSettings(base, remove)).toThrow(/review/)
+    const whole = validateSettingsPatch({ marketplace: { skills: [other] } })
+    expect(() => mergeSettings(base, whole)).toThrow(/review/)
+  })
+
+  it('lets the plugin service remove it', () => {
+    const remove = validateSettingsPatch({ marketplace: { skillsEdit: { remove: [skill.id] } } })
+    const next = mergeSettings(base, remove, { plugins: true })
+    expect(next.marketplace.skills.map((item) => item.id)).toEqual([other.id])
+  })
+
+  it('still lets anyone turn it off and remove other skills', () => {
+    const off = validateSettingsPatch({
+      marketplace: { skillsEdit: { put: [{ ...skill, on: false }], remove: [other.id] } },
+    })
+    const next = mergeSettings(base, off)
+    expect(next.marketplace.skills).toEqual([{ ...skill, on: false }])
+  })
+
+  it('lets anyone choose its agents, in an edit and in a whole list', () => {
+    const edit = validateSettingsPatch({
+      marketplace: { skillsEdit: { put: [{ ...skill, agents: ['codex'] }] } },
+    })
+    expect(mergeSettings(base, edit).marketplace.skills[0]).toEqual({
+      ...skill,
+      agents: ['codex'],
+    })
+    const whole = validateSettingsPatch({
+      marketplace: { skills: [{ ...skill, on: false, agents: ['codex'] }, other] },
+    })
+    expect(mergeSettings(base, whole).marketplace.skills[0]).toEqual({
+      ...skill,
+      on: false,
+      agents: ['codex'],
+    })
+  })
+
+  it('takes nothing else of it from anyone but the plugin service', () => {
+    const edit = validateSettingsPatch({
+      marketplace: {
+        skillsEdit: { put: [{ ...skill, description: 'Other.', version: '9.9.9', on: false }] },
+      },
+    })
+    expect(mergeSettings(base, edit).marketplace.skills[0]).toEqual({ ...skill, on: false })
+    expect(mergeSettings(base, edit, { plugins: true }).marketplace.skills[0]).toMatchObject({
+      description: 'Other.',
+      version: '9.9.9',
+    })
+  })
+
+  it('refuses to add one, but for the plugin service', () => {
+    const added = { ...skill, id: 'plugin:p0123456789ab:audit', name: 'audit' }
+    const add = validateSettingsPatch({ marketplace: { skillsEdit: { put: [added] } } })
+    expect(() => mergeSettings(base, add)).toThrow(/audit/)
+    expect(
+      mergeSettings(base, add, { plugins: true }).marketplace.skills.map((i) => i.id),
+    ).toContain(added.id)
   })
 })
 
@@ -751,5 +904,90 @@ describe('the pages the sidebar lists', () => {
     const shown = mergeSettings(hidden, { appearance: { sidebarHidden: ['overview'] } })
     expect(shown.appearance.sidebarHidden).toEqual(['overview'])
     expect(shown.appearance.sidebarOrder).toEqual(ALL)
+  })
+})
+
+describe('the relay a host uses', () => {
+  const own = { url: 'https://relay.example.com', pin: null }
+
+  it('reads a file from before the own relay, whose relay is a switch', async () => {
+    await save({ version: 1, remote: { relay: true } })
+    expect((await SettingsStore.load(dir)).get().remote.relay).toBe('kettu')
+    await save({ version: 1, remote: { relay: false } })
+    expect((await SettingsStore.load(dir)).get().remote.relay).toBe('off')
+  })
+
+  it('keeps the own relay with its address, and goes without a relay without one', async () => {
+    await save({ version: 1, remote: { relay: 'own', ownRelay: own } })
+    expect((await SettingsStore.load(dir)).get().remote).toMatchObject({
+      relay: 'own',
+      ownRelay: own,
+    })
+    await save({ version: 1, remote: { relay: 'own' } })
+    expect((await SettingsStore.load(dir)).get().remote.relay).toBe('off')
+    // A Kettu address or plain http to another computer is never kept as the owner's relay.
+    for (const url of ['https://relay.kettu.sh', 'http://203.0.113.7:8080']) {
+      await save({ version: 1, remote: { relay: 'own', ownRelay: { url, pin: null } } })
+      expect((await SettingsStore.load(dir)).get().remote).toMatchObject({
+        relay: 'off',
+        ownRelay: null,
+      })
+    }
+  })
+
+  it('takes the switch of older clients and the choice in a change', () => {
+    const before = structuredClone(DEFAULT_SETTINGS)
+    expect(
+      mergeSettings(before, validateSettingsPatch({ remote: { relay: false } })).remote.relay,
+    ).toBe('off')
+    expect(
+      mergeSettings(before, validateSettingsPatch({ remote: { relay: true } })).remote.relay,
+    ).toBe('kettu')
+    expect(() => validateSettingsPatch({ remote: { relay: 'elsewhere' } })).toThrow()
+    // The own relay is chosen only once its check passed, which gives it its address.
+    expect(() =>
+      mergeSettings(before, validateSettingsPatch({ remote: { relay: 'own' } })),
+    ).toThrow()
+    expect(() => validateSettingsPatch({ remote: { ownRelay: own } })).toThrow()
+    const checked = withOwnRelay(before, own)
+    expect(checked.remote).toMatchObject({ relay: 'own', ownRelay: own })
+    expect(
+      mergeSettings(checked, validateSettingsPatch({ remote: { relay: 'kettu' } })).remote,
+    ).toMatchObject({ relay: 'kettu', ownRelay: own })
+    expect(() => withOwnRelay(before, { url: 'https://relay.kettu.sh', pin: null })).toThrow()
+  })
+
+  it('holds direct connections on with no relay, and frees them on the own relay', () => {
+    const on = structuredClone(DEFAULT_SETTINGS)
+    on.remote.enabled = true
+    on.remote.direct.enabled = false
+    expect(effectiveDirect({ ...on, remote: { ...on.remote, relay: 'off' } }, true).enabled).toBe(
+      true,
+    )
+    expect(
+      effectiveDirect({ ...on, remote: { ...on.remote, relay: 'kettu' } }, false).enabled,
+    ).toBe(true)
+    expect(
+      effectiveDirect({ ...on, remote: { ...on.remote, relay: 'own', ownRelay: own } }, false)
+        .enabled,
+    ).toBe(false)
+  })
+
+  it('tells older clients a switch and newer ones the choice', () => {
+    const file = withOwnRelay(structuredClone(DEFAULT_SETTINGS), own)
+    const part = hostSettingsPart(file)
+    expect(part.remote).toMatchObject({ relay: false, relayChoice: 'own', ownRelay: own })
+    expect(withHostSettings(structuredClone(DEFAULT_SETTINGS), part).remote).toMatchObject({
+      relay: 'own',
+      ownRelay: own,
+    })
+    // A host from before sends its switch alone.
+    const older = { ...part, remote: { ...part.remote, relay: true } }
+    delete (older.remote as { relayChoice?: unknown }).relayChoice
+    delete (older.remote as { ownRelay?: unknown }).ownRelay
+    expect(withHostSettings(structuredClone(DEFAULT_SETTINGS), older).remote).toMatchObject({
+      relay: 'kettu',
+      ownRelay: null,
+    })
   })
 })

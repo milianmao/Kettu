@@ -13,6 +13,7 @@
     "artifacts": "Artifacts",
     "sharing": "Sharing",
     "remote": "Remote access",
+    "plugins": "Plugins",
     "browser": "Browser",
     "harnesses": "Harnesses",
     "memory": "Memory",
@@ -81,6 +82,11 @@
       "name": "Continue after a plan limit resets",
       "description": "A session stopped by a used-up plan window carries on by itself when the window resets.",
       "keywords": "plan limit quota reset continue session"
+    },
+    "promptSuggestions": {
+      "name": "Suggest the next message",
+      "description": "After a turn, the empty message box shows what you might say next; Tab fills it in. Claude Code only, from its prompt cache.",
+      "keywords": "suggestion predict next message prompt tab autocomplete composer"
     },
     "agentPasswords": {
       "name": "Let agents type passwords",
@@ -172,6 +178,7 @@
       "builtIn": "Built in",
       "file": "File",
       "catalog": "Catalog",
+      "plugin": "From {{plugin}}",
       "more": "More for “{{name}}”",
       "export": "Export…",
       "exported": "Saved {{file}} to {{folder}}",
@@ -1237,8 +1244,27 @@
       "name": "GitHub",
       "keywords": "source code repository license issue bug report"
     },
+    "issues": {
+      "name": "Bugs and suggestions",
+      "description": "Open an issue on GitHub, in any language.",
+      "keywords": "feedback contact bug feature request suggestion issue",
+      "open": "New issue"
+    },
+    "email": {
+      "name": "Email",
+      "description": "hello@kettu.sh",
+      "keywords": "email mail contact address feedback",
+      "copy": "Copy address"
+    },
+    "x": {
+      "name": "X",
+      "description": "@KettuAI",
+      "keywords": "x twitter follow news contact",
+      "open": "Follow"
+    },
     "groups": {
-      "updates": "Updates"
+      "updates": "Updates",
+      "contact": "Contact us"
     }
   },
   "pages": {
@@ -1253,12 +1279,13 @@
     "git": "The top bar’s branch and changes, pull requests and their checks all come from these two tools.",
     "advanced": "Network proxy, diagnostics and the data Kettu keeps on this computer.",
     "advanced_web": "Network proxy, diagnostics and the data Kettu keeps on {{host}}.",
-    "about": "Kettu’s version and updates.",
+    "about": "Kettu’s version, updates and how to reach us.",
     "archived": "Off the sidebar but kept. Restore one to put it back where it was.",
     "artifacts": "Pages ask before they read project files or ask your agent. Pages that only keep their own data don’t ask.",
     "sharing": "Publish artifacts to links, on Kettu or through your own Cloudflare account; choose who can open a page on Kettu.",
     "remote": "Use this computer’s sessions from Kettu on an iPhone, an iPad or another computer.",
     "remote_web": "Use {{host}}’s sessions from Kettu on an iPhone, an iPad or another computer.",
+    "plugins": "The settings of the plugins you installed, and what each plugin’s script can do. Install and remove plugins in the Marketplace.",
     "browser": "Sign-ins, how links from agents open, and the sites they may use.",
     "browserWeb": "Links in agents’ replies open in a new tab.",
     "harnesses": "The programs agents run on: Claude Code, Codex and the rest. Kettu uses what is already on your computer, and installs a copy only when there is none.",
@@ -1396,7 +1423,9 @@
       "ssh": "SSH",
       "sshAt": "SSH · {{target}}",
       "relay": "Kettu relay",
-      "relayAt": "Kettu relay · {{region}}"
+      "relayAt": "Kettu relay · {{region}}",
+      "ownRelay": "Your relay",
+      "ownRelayAt": "Your relay · {{host}}"
     },
     "failed": {
       "not_connected": "{{name}} is not connected. Try again once it is online.",
@@ -1632,7 +1661,9 @@
         "keywords": "computers hosts switch open other add pair",
         "open": "Open",
         "add": "Add a computer…",
-        "addDescription": "Pair this browser with another computer signed in to this account."
+        "addDescription": "Pair this browser with another computer signed in to this account.",
+        "descriptionRelay": "The other computers this browser is paired with through this relay. Open one to use it here in place of {{name}}.",
+        "addDescriptionRelay": "Pair this browser with another computer that uses this relay."
       }
     },
     "account": {
@@ -1673,6 +1704,43 @@
         "rejected": "{{name}} did not add this computer.",
         "unreachable": "Could not reach {{name}} through the Kettu relay. Check that it is on and signed in, then try again."
       }
+    },
+    "load": {
+      "group": "Load",
+      "live": "Live",
+      "cpu": "CPU",
+      "memory": "Memory",
+      "mem": "Mem",
+      "disk": "Disk",
+      "network": "Network",
+      "battery": "Battery",
+      "cpuLabel": "CPU in use",
+      "memoryLabel": "Memory in use",
+      "cores_one": "{{count}} core",
+      "cores_other": "{{count}} cores",
+      "coresLimit_one": "Limited to {{count}} core",
+      "coresLimit_other": "Limited to {{count}} cores",
+      "memoryOf": "{{used}} of {{total}}",
+      "memoryState": {
+        "plenty": "plenty free",
+        "tight": "running tight",
+        "critical": "critical"
+      },
+      "free": "free",
+      "diskOf": "of {{total}}",
+      "io": "Read {{read}} · Write {{write}}",
+      "networkSub": "↓ received · ↑ sent",
+      "networkLabel": "Received {{receive}}, sent {{send}}",
+      "batteryPercent": "Battery {{percent}}%",
+      "onBatteryPercent": "On battery, {{percent}}%",
+      "charging": "Charging",
+      "onBattery": "On battery",
+      "pluggedIn": "Plugged in",
+      "left": "{{time}} left",
+      "minutes": "{{m}} min",
+      "hoursMinutes": "{{h}} h {{m}} min",
+      "old": "Update Kettu on {{name}} to see its load here.",
+      "note": "Only these totals are read: CPU, memory, disk, network and battery, and only while you look. They travel only between {{name}} and your own devices, end-to-end encrypted; nothing is kept, and Kettu’s servers never receive them."
     }
   },
   "remote": {
@@ -1702,7 +1770,8 @@
       "serviceKey_web": "{{host}}’s key is kept in a file only its user can read, because a service that starts with the computer cannot count on an unlocked keyring.",
       "offLine": "Off",
       "firewall": "Devices on the same network connect to it directly, so the system may ask once whether Kettu can accept incoming connections.",
-      "relay": "reachable from anywhere"
+      "relay": "reachable from anywhere",
+      "ownRelay": "through {{host}}"
     },
     "hostName": {
       "name": "This computer’s name",
@@ -1847,7 +1916,9 @@
       "added": "“{{name}}” is added",
       "description": "It adds one device. Anyone who sees the code before then could use it.",
       "description_web": "It adds one device. Anyone who sees the code before then could use it.",
-      "expiresIn": "Expires in {{time}}"
+      "expiresIn": "Expires in {{time}}",
+      "ownRelay": "It goes through {{host}}: the code carries your relay, so the device needs no account and nothing set up.",
+      "browserHintOwnRelay": "Or open the link in a browser on any network: your relay serves the web client."
     },
     "device": {
       "rename": "Rename",
@@ -1924,13 +1995,10 @@
     "groups": {
       "permissions": "Permissions",
       "danger": "Danger zone",
-      "advanced": "Advanced"
+      "relay": "Relay"
     },
     "relay": {
-      "name": "Use the Kettu relay",
-      "description": "While this computer is signed in to your Kettu account, your devices signed in to the same account reach it from anywhere. Off, they connect directly.",
-      "description_web": "While {{host}} is signed in to your Kettu account, your devices signed in to the same account reach it from anywhere. Off, they connect directly.",
-      "keywords": "relay cloud anywhere internet region account kettu",
+      "keywords": "relay cloud anywhere internet region account kettu self-hosted own server access key",
       "regions": "Relays",
       "regionsDescription": "Signed in to each at once; a device uses whichever joins first.",
       "regionsNone": "Shown once signed in to the relay.",
@@ -1955,7 +2023,85 @@
         "busy": "Too many connections for now. Kettu tries again in a moment."
       },
       "signInHint": "Sign in to your Kettu account to reach this computer from anywhere. Direct connections still work.",
-      "signInHint_web": "Sign in to a Kettu account on {{host}} to reach it from anywhere. Direct connections still work."
+      "signInHint_web": "Sign in to a Kettu account on {{host}} to reach it from anywhere. Direct connections still work.",
+      "group": "Relay",
+      "groupDescription": "How your devices reach this computer from other networks: the Kettu relay, a relay you run yourself, or none.",
+      "groupDescription_web": "How your devices reach {{host}} from other networks: the Kettu relay, a relay you run yourself, or none.",
+      "onlyKettu": "Only with the Kettu relay.",
+      "choice": {
+        "kettu": {
+          "name": "Kettu relay",
+          "short": "Kettu relay",
+          "description": "Run by Kettu. This computer and your devices sign in to one Kettu account.",
+          "description_web": "Run by Kettu. {{host}} and your devices sign in to one Kettu account."
+        },
+        "own": {
+          "name": "Your own relay",
+          "short": "Your own",
+          "description": "A relay you run on your own server. No Kettu account needed.",
+          "descriptionLocal": "A relay you run on your own server. Nothing goes to Kettu.",
+          "older": "Update Kettu on this computer to use a relay of your own."
+        },
+        "off": {
+          "name": "No relay",
+          "short": "None",
+          "description": "Devices connect on the same network, over a VPN or SSH."
+        }
+      },
+      "note": {
+        "switch": "Kettu checks the relay and the key before it switches. Devices online now move over at once; the others the next time they reach this computer on the same network, or when you add them again.",
+        "own": "Only one relay at a time. Your Kettu account still sends this computer’s notifications to your iPhone.",
+        "pinned": "The Kettu apps on computers and iPhones reach it. Browsers can’t check a pinned certificate, so they need a relay with a domain.",
+        "local": "In Local mode Kettu sends nothing to its own services. Your relay is yours, so it stays.",
+        "switch_web": "Kettu checks the relay and the key before it switches. Devices online now move over at once; the others the next time they reach {{host}} on the same network, or when you add them again.",
+        "own_web": "Only one relay at a time. Your Kettu account still sends {{host}}’s notifications to your iPhone."
+      },
+      "own": {
+        "address": "Address",
+        "addressHint": "Paste the link the relay printed when it started; its key comes with it.",
+        "pinnedHint": "Its certificate is pinned from the link, as for a relay at an IP address.",
+        "key": "Access key",
+        "keyHint": "Kept on this computer only. Devices never get it.",
+        "keyKept": "Leave it empty to keep the key ending in {{end}}.",
+        "noKey": "None kept",
+        "docs": "How to run a relay",
+        "docsUrl": "https://github.com/KettuAI/relay/blob/main/docs/deploy.md",
+        "cancel": "Cancel",
+        "use": "Use this relay",
+        "checking": "Checking…",
+        "change": "Change…",
+        "replace": "Replace…",
+        "pasteLink": "Paste new link…",
+        "connecting": "Connecting to {{host}}…",
+        "lineFailed": "Can’t reach {{host}}",
+        "refusedHint": "The relay refused this computer’s access key. Paste the link it prints now under Relay.",
+        "state": {
+          "noKey": "No access key kept · paste the relay’s link",
+          "connecting": "Connecting…",
+          "connected": "Connected",
+          "rtt": "{{ms}} ms",
+          "version": "relay {{version}}",
+          "pinned": "certificate pinned",
+          "refused": "Refused · the relay has a new access key",
+          "busy": "Too many connections · trying again",
+          "unreachable": "Can’t reach · trying again"
+        },
+        "problem": {
+          "address": "Enter the relay’s address, such as https://relay.example.com.",
+          "kettu": "That’s the Kettu relay. Choose Kettu relay above to use it.",
+          "http": "Use https. Only a relay on this computer itself may use http.",
+          "key": "Enter the access key the relay printed.",
+          "unreachable": "Can’t reach {{host}}. Check that the relay runs and that port {{port}} is open to the internet.",
+          "certificate": "The certificate of {{host}} isn’t valid. A relay at an IP address prints a link with its certificate’s pin.",
+          "certificatePinned": "Its certificate is not the pinned one. Paste the link the relay prints now.",
+          "not_kettu": "This address doesn’t answer as a Kettu relay.",
+          "protocol": "This relay speaks another version of the relay protocol. Update the relay, or Kettu.",
+          "no_access_key": "This relay takes no access key. Update kettu-relay on the server.",
+          "key_refused": "The relay refused this key. On the relay,",
+          "key_refusedEnd": "prints the link with its current key."
+        },
+        "keyHint_web": "Kept on {{host}} only. Devices, this one included, never get it back."
+      }
     },
     "discoverable": {
       "name": "Let devices on your account find this computer",
@@ -2277,7 +2423,7 @@
       "direct": "Devices on the same network, a VPN or a forwarded port will reach this computer directly.",
       "terminal": "Paired devices will be able to run any command on this computer.",
       "discoverable": "Devices signed in to your Kettu account will be able to find this computer and ask to be added.",
-      "relay": "Devices will reach this computer through the Kettu relay from any network.",
+      "relay": "Changes which relay your devices reach this computer through from other networks.",
       "proxy": "Agents, npx and updates will go through this proxy.",
       "source": "Changes where Kettu downloads its updates from."
     }
@@ -2289,5 +2435,61 @@
     "noMonospaceMatch": "No monospace font matches.",
     "loading": "Reading the installed fonts…",
     "unavailable": "This browser cannot list fonts. Type a name to use it."
+  },
+  "plugins": {
+    "back": "Plugins",
+    "loading": "Reading plugins…",
+    "readFailed": "Couldn’t read the plugins: {{error}}",
+    "retry": "Try again",
+    "empty": {
+      "title": "No plugins installed",
+      "hint": "Plugins you install in the Marketplace show up here with their settings."
+    },
+    "notInstalled": "This plugin isn’t installed.",
+    "row": {
+      "open": "Open {{name}}",
+      "settings_one": "{{count}} setting",
+      "settings_other": "{{count}} settings",
+      "noSettings": "No settings"
+    },
+    "state": {
+      "off": "Off",
+      "noScript": "No script",
+      "idle": "Script ready",
+      "active": "Script running",
+      "disabled": "Script stopped after crashing too often"
+    },
+    "settings": {
+      "heading": "Settings",
+      "none": "This plugin has no settings."
+    },
+    "secret": {
+      "set": "Set",
+      "notSet": "Not set",
+      "setAction": "Set…",
+      "change": "Change…",
+      "clear": "Clear",
+      "save": "Save",
+      "cancel": "Cancel",
+      "placeholder": "Paste the secret",
+      "note": "Kept on this computer. Only this plugin’s script can read it; agents can’t."
+    },
+    "channels": {
+      "hint": "Notices of the kinds you switch on are sent here. Nothing goes until you pick one."
+    },
+    "script": {
+      "heading": "What its script can do",
+      "none": "This plugin runs no script.",
+      "nothing": "Its script asks for nothing beyond its own settings and storage.",
+      "high": "High risk"
+    },
+    "manage": {
+      "heading": "Manage",
+      "enabled": "Enabled",
+      "uninstallName": "Uninstall",
+      "uninstallHint": "Removes the plugin with its settings, secrets and stored data.",
+      "uninstall": "Uninstall…"
+    },
+    "changeFailed": "Couldn’t change {{name}}: {{error}}"
   }
 }

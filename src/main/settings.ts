@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto'
 import { join } from 'node:path'
-import type { AddedAgent, SettingsFile } from '@shared/settings'
+import type { AddedAgent, OwnRelaySettings, SettingsFile } from '@shared/settings'
 import { HARNESS_IDS, isHarnessId, type AgentId, type HarnessId } from '@shared/thread'
 import { parseSessionsFile, parseRoutinesFile } from '../agent-host/storage'
 import { JsonFileWriter, quarantineFile, readJsonFile } from './json-file'
@@ -22,6 +22,7 @@ import {
   withRenamedAgent,
   withAllowedComputerApp,
   withShellPath,
+  withOwnRelay,
 } from './settings-schema'
 
 const log = createLogger('settings')
@@ -199,9 +200,12 @@ export class SettingsStore {
     return this.current
   }
 
-  /** Applies a patch from the renderer; throws a `SettingsError` and changes nothing if invalid. */
-  update(patch: unknown): SettingsFile {
-    const merged = mergeSettings(this.current, validateSettingsPatch(patch))
+  /**
+   * Applies a patch from the renderer; throws a `SettingsError` and changes nothing if invalid.
+   * Only the plugin service's own patch (`plugins`) may remove an item a plugin brought.
+   */
+  update(patch: unknown, options: { plugins?: boolean } = {}): SettingsFile {
+    const merged = mergeSettings(this.current, validateSettingsPatch(patch), options)
     return this.replace(withDirectPort(merged, randomDirectPort))
   }
 
@@ -232,6 +236,11 @@ export class SettingsStore {
 
   moveAgent(agentId: AgentId, configDir: string): SettingsFile {
     return this.replace(withMovedAgent(this.current, agentId, configDir))
+  }
+
+  /** The owner's own relay passed its check: it is the one in use from now on. */
+  useOwnRelay(own: OwnRelaySettings): SettingsFile {
+    return this.replace(withOwnRelay(this.current, own))
   }
 
   setShellPath(shellPath: string): SettingsFile {

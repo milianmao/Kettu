@@ -11,6 +11,9 @@ export const isWeb = window.kettu.client === 'web'
 /** The hosted web client, which signs in to a Kettu account and reaches its hosts through the relay. */
 export const isHosted = isWeb && window.kettu.hosted === true
 
+/** The web client a relay the owner runs serves, which reaches its hosts through that relay. */
+export const isRelayPage = isWeb && window.kettu.relayPage === true
+
 /**
  * The window's frame: macOS's traffic lights over the content, the band beside the window controls
  * on Windows and Linux, or none in a browser.
@@ -22,6 +25,14 @@ export const windowFrame: 'mac' | 'band' | 'none' = isWeb ? 'none' : isMac ? 'ma
  * one, headers take the top corner as on macOS, where the traffic lights take no room in a browser.
  */
 export const hasBand = windowFrame === 'band'
+
+/**
+ * What a menu keeps clear of the window's edges: the window's own controls lie over the top 40 px
+ * (--title-bar), the traffic lights on macOS and the band on Windows and Linux, and the other edges
+ * keep Base UI's 5 px. A menu taller than the room left scrolls inside it.
+ */
+export const menuCollisionPadding =
+  windowFrame === 'none' ? undefined : { top: 40, right: 5, bottom: 5, left: 5 }
 
 /** The system of the host whose paths the page shows, which in the web client is another's. */
 export function hostPlatform(): Platform {

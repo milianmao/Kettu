@@ -18,8 +18,12 @@ import { run } from './discovery'
 import { framePlan, type FramePlan } from './frame'
 import { FRAME_TAG, FrameReader, frameJson, taggedJson } from './framing'
 import { freePort, nodeCommand, packageRoot } from './runtime'
+import { stopOrphanedServeSims } from './serve-sim-orphans'
 
 const START_TIMEOUT_MS = 60_000
+/** How long `simctl bootstatus` may take; a first boot migrates data for minutes, so gets longer. */
+const BOOT_WAIT_MS = 180_000
+const MIGRATING_BOOT_WAIT_MS = 600_000
 const INPUT_ADMITTED = 0x83
 const SCREEN_CONFIG = 0x82
 const PASTE = 0x12
@@ -72,12 +76,16 @@ export class IosSimulatorDriver implements DeviceDriver {
 
   async start(events: DriverEvents): Promise<void> {
     this.events = events
+    const script = serveSimScript()
+    await stopOrphanedServeSims(script, this.udid, this.env, this.log)
     const port = await freePort()
+    // Stopped while it looked for orphans: a serve-sim started now would have nobody to stop it.
+    if (this.stopped) return
     const node = nodeCommand(this.env as NodeJS.ProcessEnv)
     const child = spawn(
       node.file,
       [
-        serveSimScript(),
+        script,
         this.udid,
         '--require-token',
         '-q',
@@ -99,7 +107,7 @@ export class IosSimulatorDriver implements DeviceDriver {
       this.child = null
       if (!this.stopped) this.end(t('devices.simulatorStopped', { code: code ?? 'signal' }))
     })
-    this.started = await new Promise<Started>((resolve, reject) => {
+    const started = new Promise<Started>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new DriverError('start_timeout', t('devices.simulatorStreamSlow'))),
         START_TIMEOUT_MS,
@@ -124,6 +132,13 @@ export class IosSimulatorDriver implements DeviceDriver {
         reject(new DriverError('start_failed', t('devices.simulatorStreamFailed')))
       })
     })
+    try {
+      this.started = await started
+    } catch (error) {
+      // One that never reported its address would run on beside the next try.
+      await this.stop()
+      throw error
+    }
     this.openInput()
     void this.readVideo()
   }
@@ -413,7 +428,7 @@ export class IosSimulatorDriver implements DeviceDriver {
   }
 }
 
-/** Boots the simulator and waits until it is up; false when it was booted already. */
+/** Starts booting the simulator; false when it was booted already. */
 export async function bootSimulator(xcrun: string, udid: string, env: Env): Promise<boolean> {
   let booted = true
   await run(xcrun, ['simctl', 'boot', udid], env, 120_000).catch((error: { stderr?: string }) => {
@@ -421,8 +436,44 @@ export async function bootSimulator(xcrun: string, udid: string, env: Env): Prom
     if (!/current state: Booted/i.test(error.stderr ?? '')) throw error
     booted = false
   })
-  await run(xcrun, ['simctl', 'bootstatus', udid, '-b'], env, 180_000)
   return booted
+}
+
+/** Waits until a simulator that is booting is up. */
+export function waitUntilBooted(xcrun: string, udid: string, env: Env): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(xcrun, ['simctl', 'bootstatus', udid, '-b'], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    const begun = Date.now()
+    let migrating = false
+    let stderr = ''
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      // The step it waits on, on a line of its own under each status: "\tWaiting on Data Migration".
+      if (/^\tWaiting on Data Migration/i.test(line)) migrating = true
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-2_000)
+    })
+    const timer = setInterval(() => {
+      const limit = migrating ? MIGRATING_BOOT_WAIT_MS : BOOT_WAIT_MS
+      if (Date.now() - begun < limit) return
+      clearInterval(timer)
+      child.kill('SIGKILL')
+      reject(new Error(`simctl bootstatus did not finish within ${limit / 60_000} minutes`))
+    }, 1_000)
+    child.once('error', (error) => {
+      clearInterval(timer)
+      reject(error)
+    })
+    child.once('exit', (code, signal) => {
+      clearInterval(timer)
+      if (code === 0) resolve()
+      else reject(new Error(`simctl bootstatus failed (${code ?? signal}): ${stderr.trim()}`))
+    })
+  })
 }
 
 export async function shutdownSimulator(xcrun: string, udid: string, env: Env): Promise<void> {

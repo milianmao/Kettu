@@ -270,6 +270,8 @@ export type McpServer =
       headers: { name: string; value: string }[]
       /** Tools of the server that an agent runs without asking, where its own settings can say so. */
       autoAllow?: string[]
+      /** 仅在 Auto 权限模式下自动放行的可回滚内置工具（不涉及不可逆破坏操作）。 */
+      autoModeAllow?: string[]
       /** A paragraph for the agent's own instructions, where it takes one. */
       prompt?: string
       /** Holds a token or a value from the key store, so it must never reach a command line. */
@@ -292,8 +294,11 @@ export type PromptBlock =
   | { type: 'resource'; resource: { uri: string; mimeType: string; text: string } }
 
 export function promptBlocks(content: readonly UserContent[]): PromptBlock[] {
-  return content.map((item): PromptBlock => {
-    if (item.type === 'text') return { type: 'text', text: item.text }
+  // What a mentioned item adds is read as the message is sent, and goes as blocks of its own.
+  const own = content.filter((item) => item.type !== 'ref' || item.ref.kind !== 'plugin')
+  return own.map((item): PromptBlock => {
+    // A command of Kettu's goes as the message it expands to.
+    if (item.type === 'text') return { type: 'text', text: item.command?.sent ?? item.text }
     const ref = item.ref
     switch (ref.kind) {
       case 'image':
@@ -316,6 +321,9 @@ export function promptBlocks(content: readonly UserContent[]): PromptBlock[] {
       case 'audio':
       case 'video':
         return { type: 'text', text: ref.mimeType }
+      // Left out above; never reached.
+      case 'plugin':
+        return { type: 'text', text: ref.name }
       default:
         return { type: 'text', text: ref.label }
     }
@@ -382,6 +390,11 @@ export interface SessionOptions {
    */
   promptAhead?: boolean
   /**
+   * The instructions of the role the session started as, in the block Kettu's guide stands in:
+   * handed over the way the guide and memory are, and ahead of its prompts in the cases they are.
+   */
+  role?: string
+  /**
    * Kettu's guide and memory worded for an agent with `systemPromptAppend`, which adds them to the
    * system prompt of a session it starts; the agent keeps them with the session, so only
    * `newSession` takes it.
@@ -392,6 +405,8 @@ export interface SessionOptions {
    * agy's flag, which would otherwise cost a restart right after `session/new`.
    */
   fullAccess?: boolean
+  /** Ask the agent for a guess at the user's next message after each turn, where it offers one. */
+  suggestions?: boolean
 }
 
 /** Kettu's memory as a session starts with it. */

@@ -128,6 +128,8 @@ export type MainToHost =
       values: Record<string, Record<string, string>>
       oauth?: Record<string, string>
       agentEnv?: Record<string, Record<string, string>>
+      // The secrets the plugins declare, by plugin id then key; read by the plugin's own script only.
+      pluginSecrets?: Record<string, Record<string, string>>
     }
   | { type: 'host:busy-request'; requestId: number }
   // A problem report's bundle, answered by host:report. The parent adds its own part; the host
@@ -168,6 +170,10 @@ export type MainToHost =
       format: ArtifactExportFormat
     }
   | { type: 'host:power'; state: 'suspend' | 'resume' }
+  // The window's color mode, right after host:init at every start and whenever it changes.
+  | { type: 'host:color-mode'; mode: 'light' | 'dark' }
+  // On Windows, whether the computer runs on battery, for its load; sent at start and on change.
+  | { type: 'host:battery'; onBattery: boolean }
   /** `verbose`: detailed records, which the debug level alone does not write. */
   | { type: 'host:log-level'; level: 'debug' | 'info'; verbose: boolean }
   // Allow once, from a request's notification: answered as one of the host's own windows would.
@@ -187,6 +193,8 @@ export type MainToHost =
   | { type: 'trash-result'; callId: number; error: string | null }
   // The answer to a host:settings-call.
   | { type: 'settings-result'; callId: number; answer: SettingsCallAnswer }
+  // The answer to a host:plugin-secret: null once the key store holds the change, else why not.
+  | { type: 'plugin-secret-result'; callId: number; error: string | null }
   // A browser call now waits for the user to answer a new origin, so its limit grows to that wait.
   | { type: 'host:browser-waiting'; callId: number; waiting: boolean }
   // A page waits for a new origin: the session's thread shows it, waiting for the user.
@@ -203,6 +211,9 @@ export type MainToHost =
   | { type: 'host:device-handed-back'; sessionId: string; durationMs: number }
   // The user handed back a terminal the session's agent started.
   | { type: 'host:terminal-handed-back'; sessionId: string; durationMs: number }
+  // The plugin host is ready. In the desktop app its port travels in the transfer list; under
+  // Node.js `socketPath` names the socket to connect to.
+  | { type: 'host:plugin-port'; socketPath?: string }
   | { type: 'host:shutdown' }
 
 /**
@@ -219,7 +230,9 @@ export interface SettingsSnapshot {
   facts: SettingFacts
 }
 
-export type SettingsCall = { kind: 'read' } | { kind: 'change'; patch: SettingsPatch }
+/** `plugins`: the change is the plugin service's own, the only one that may remove a plugin's items. */
+export type SettingsCall =
+  { kind: 'read' } | { kind: 'change'; patch: SettingsPatch; plugins?: true }
 
 /** The snapshot after the call, or why the owner refused the change, which changed nothing. */
 export type SettingsCallAnswer = { result: SettingsSnapshot } | { error: string }
@@ -411,6 +424,15 @@ export type HostToMain =
   | { type: 'host:market-call'; callId: number; call: MarketCall }
   // Absolute paths for the system's trash, which only main reaches; answered by trash-result.
   | { type: 'host:trash-call'; callId: number; paths: string[] }
+  // Keeps a plugin's secret in the key store, or with a null value clears it; with a null key it
+  // clears every secret of the plugin. Answered by plugin-secret-result, after host:market-keys.
+  | {
+      type: 'host:plugin-secret'
+      callId: number
+      pluginId: string
+      key: string | null
+      value: string | null
+    }
   // An agent's settings tool reads the settings, or changes them through the same checks as the
   // Settings page, from whoever keeps the file: main or the daemon. Answered by settings-result.
   | { type: 'host:settings-call'; callId: number; call: SettingsCall }
@@ -422,6 +444,10 @@ export type HostToMain =
   | { type: 'host:computer-hold'; hold: ComputerHold | null }
   // Null when no session holds a window, or the driver could not find it.
   | { type: 'host:computer-frame'; requestId: number; frame: ComputerFrame | null }
+  // Whether a plugin's script needs the plugin host; answered by host:plugin-port once it runs.
+  | { type: 'host:plugin-host'; run: boolean }
+  // The index of the themes plugins bring changed, so the themes are read again.
+  | { type: 'host:plugin-themes' }
   | { type: 'host:stopped' }
 
 export type MainToTerminalHost =
@@ -577,8 +603,9 @@ export type MainToRemoteHost =
       /** The Ed25519 seed to sign in to the relay with, in base64. Never logged. */
       relayKey?: string
     }
-  // Use the Kettu relay turned on or off.
-  | { type: 'remote-host:relay'; enabled: boolean }
+  // Use the Kettu relay turned on or off, or the owner's own relay chosen, changed or left, which
+  // `own` gives in place of the Kettu relay.
+  | { type: 'remote-host:relay'; enabled: boolean; own?: OwnRelayInit | null }
   // Whether devices of the account find this host on the relay; off ends the open request.
   | { type: 'remote-host:discoverable'; enabled: boolean }
   // The owner's answer to a discovery request, with the name to add the device under.
@@ -661,6 +688,14 @@ export type MainToRemoteHost =
   // Tells every device why, then stops.
   | { type: 'remote-host:shutdown'; reason: RemoteHostStopReason }
 
+/** A relay the owner runs, which the host signs in to alone, with its access key. */
+export interface OwnRelayInit {
+  url: string
+  pin: string | null
+  /** The relay's access key. Never logged. */
+  key: string
+}
+
 /** What the remote host starts the relay with. */
 export interface RelayInit {
   /** The main relay's origin, which lists the regions. */
@@ -679,6 +714,8 @@ export interface RelayInit {
    * null or absent before. Never logged.
    */
   relayToken?: string | null
+  /** The owner's own relay, used in place of the Kettu relay; null or absent for none. */
+  own?: OwnRelayInit | null
 }
 
 /** What the remote host reports to main, for Settings. */
@@ -702,6 +739,18 @@ export interface RemoteHostStatus {
   sshPort?: number | null
   /** Each relay the host signs in to and how it is doing; none while it signs in to none. */
   relays: RelayStatus[]
+  /** The owner's own relay while it is the one in use, as its `GET /v1` and pings say. */
+  ownRelay?: OwnRelayStatus
+}
+
+/** What Settings shows of the owner's own relay beside its connection. */
+export interface OwnRelayStatus {
+  /** The relay program's version, null until it says. */
+  version: string | null
+  /** The host's round trip to it in milliseconds, null before the first. */
+  rtt: number | null
+  /** It serves the web client, which a browser pairs on. */
+  web: boolean
 }
 
 /** Direct connections, as the remote host runs them. */

@@ -7,14 +7,15 @@ import os from 'node:os'
 import path from 'node:path'
 import { ARTIFACT_RECORDS } from '@shared/remote/host-admin'
 import { AGENTS_FOLDER, KETTU_HOME_FOLDER } from '@shared/storage'
+import { PLUGIN_THEMES_FILE } from '@shared/plugin-themes'
 import { BUILTIN_THEME_ID } from '@shared/themes'
 import { AgentFolders } from '../main/agent-folders'
-import { AdminError, HostAdmin, type HostAdminDeps } from '../main/host-admin'
+import { AdminError, HostAdmin, type AdminRemote, type HostAdminDeps } from '../main/host-admin'
 import { t } from '../main/i18n'
 import type { SettingsStore } from '../main/settings'
 import { nodeSystemNameForRun } from '../main/system-name'
 import { ThemeCatalog } from '../main/theme-catalog'
-import { readThemeFolder, readThemeSources, ThemeStore } from '../main/themes'
+import { readPluginThemes, readThemeFolder, readThemeSources, ThemeStore } from '../main/themes'
 import { ControlError } from './control'
 import type { Hosts } from './hosts'
 import { proxiedFetch } from './proxy'
@@ -53,6 +54,8 @@ export interface DaemonAdminOptions {
   /** Submits a bundle `report` gave, with the daemon's sign-in. */
   submitReport?: HostAdminDeps['submitReport']
   marketKeys: HostAdminDeps['marketKeys']
+  /** Checks the owner's own relay and switches to it once it passed. */
+  useOwnRelay: AdminRemote['useOwnRelay']
 }
 
 /** A server has no trash, so a folder Kettu made moves into one of the daemon's own. */
@@ -82,17 +85,21 @@ export async function startDaemonAdmin({
   report,
   submitReport,
   marketKeys,
+  useOwnRelay,
 }: DaemonAdminOptions): Promise<HostAdmin> {
   const themesDir = path.join(dataPath, 'themes')
   const sourcesFile = path.join(dataPath, 'theme-sources.json')
+  const pluginFile = path.join(dataPath, PLUGIN_THEMES_FILE)
   let admin: HostAdmin | null = null
   const themes = new ThemeStore(
     await readThemeFolder(themesDir),
     await readThemeSources(sourcesFile),
+    await readPluginThemes(pluginFile),
     BUILTIN_THEME_ID,
     {
       dir: themesDir,
       sourcesFile,
+      pluginFile,
       catalog: new ThemeCatalog(proxiedFetch(() => settings.get().proxy, env)),
       // The daemon has no window to show a theme in; each device shows the one it chose.
       select: () => {},
@@ -138,6 +145,7 @@ export async function startDaemonAdmin({
       },
       retryDirect: () => hosts.retryDirect(),
       retryRelay: () => hosts.retryRelay(),
+      useOwnRelay,
     },
     remoteStatus: () => hosts.remoteAccess(),
     info: async () => ({
@@ -150,6 +158,7 @@ export async function startDaemonAdmin({
       updates: false,
       remoteSwitch: false,
       remoteReset: true,
+      ownRelay: true,
       thumbnails: false,
       partThumbnails: false,
       artifactRecords: [...ARTIFACT_RECORDS],

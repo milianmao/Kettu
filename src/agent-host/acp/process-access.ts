@@ -2,7 +2,7 @@
 // Kettu's session router changes that flag for one session at a time.
 
 import { ANTIGRAVITY_FULL_ACCESS, OMP_FULL_ACCESS } from '@shared/agents'
-import { isConfigValue, type ConfigOption } from '@shared/thread'
+import { isConfigValue, type ConfigOption, type PendingConfig } from '@shared/thread'
 import { t } from '../i18n'
 import { compareVersions } from '../versions'
 import { MODE_OPTION } from './agy-plan'
@@ -33,11 +33,15 @@ export function offersOmpFullAccess(meta: unknown): boolean {
   )
 }
 
-/** Adds the process-backed selection to the harness's own modes. */
+/**
+ * The process-backed selection among the harness's own modes, with the pending switch of the
+ * mode row, so the interface can show a switch waiting on a turn or a restart.
+ */
 export function withFullAccess(
   config: readonly ConfigOption[],
   mode: ProcessAccessMode,
   full: boolean,
+  pending: PendingConfig | null = null,
 ): ConfigOption[] {
   return config.map((option) => {
     if (option.id !== MODE_OPTION || option.type !== 'select') return option
@@ -51,7 +55,10 @@ export function withFullAccess(
           : t('antigravity.mode.fullAccess.description'),
     })
     const value = full ? mode : option.value === mode ? HELD_MODE : option.value
-    return { ...option, choices, value }
+    const next: ConfigOption = { ...option, choices, value }
+    if (pending) next.pending = pending
+    else delete next.pending
+    return next
   })
 }
 

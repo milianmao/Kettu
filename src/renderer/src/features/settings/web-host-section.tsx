@@ -15,8 +15,11 @@ import {
 import { Icon } from '@renderer/components/affect/app-shell'
 import { Spinner } from '@renderer/components/ui/spinner'
 import { errorMessage } from '@renderer/lib/host'
+import { isRelayPage } from '@renderer/lib/platform'
+import { useLiveLoad, useLoadWatch } from '@renderer/stores/host-load'
 import { useWebHostStore, type WebHost } from '@renderer/stores/web-host'
 import { CONFIRM, ControlError, DangerButton, SetButton, SetInput, Spin } from './controls'
+import { LoadColumns } from './host-load'
 import { webHostLine } from './host-text'
 import { HostState } from './hosts-section'
 import { DeviceTile, HostIcon } from './remote-parts'
@@ -34,6 +37,9 @@ const isComposing = (event: KeyboardEvent<HTMLInputElement>): boolean =>
 /** The host this page connects to: what it runs, where it is reached, and whether it is now. */
 export function WebHostRow({ host }: { host: WebHost }) {
   const { t } = useTranslation('settings')
+  const online = host.connection.state === 'online'
+  useLoadWatch(null, online)
+  const live = useLiveLoad(null)
   return (
     <div className="ui-sg-row">
       <Thing
@@ -43,7 +49,7 @@ export function WebHostRow({ host }: { host: WebHost }) {
         <ItemLine>{webHostLine(t, host)}</ItemLine>
       </Thing>
       <span className="ui-sg-control">
-        <HostState host={host} />
+        {online && live ? <LoadColumns load={live.load} /> : <HostState host={host} />}
       </span>
     </div>
   )
@@ -74,7 +80,13 @@ export function OtherWebHosts() {
           mark={<DeviceTile icon={<Icon icon={Add01Icon} size={16} />} />}
           name={t('hosts.web.others.add')}
         >
-          <ItemLine>{t('hosts.web.others.addDescription')}</ItemLine>
+          <ItemLine>
+            {t(
+              isRelayPage
+                ? 'hosts.web.others.addDescriptionRelay'
+                : 'hosts.web.others.addDescription',
+            )}
+          </ItemLine>
         </Thing>
         <span className="ui-sg-control">
           <SetButton onClick={() => actions?.add?.()}>{t('hosts.web.others.add')}</SetButton>

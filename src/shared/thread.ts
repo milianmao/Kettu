@@ -32,6 +32,7 @@ import type {
   PublishKind,
 } from './market-publish'
 import type { MemoryAction, MemoryDraft, MemoryLayer, MemoryWriteStatus } from './memory'
+import type { PluginConversion } from './plugin-convert'
 import type { RoutineRef } from './routines'
 import type { SettingScalar, SettingsSection } from './settings-catalog'
 import type { TaskDeliverable, Workflow } from './workflow'
@@ -93,6 +94,11 @@ export interface SessionView {
   speed?: OutputSpeed
   /** Ephemeral: the main thread's latest request, for an agent whose stream counts its tokens. */
   lastRequest?: LastRequest
+  /**
+   * Ephemeral: the agent's guess at the user's next message after a turn, which the empty
+   * composer offers; null once the next turn starts.
+   */
+  suggestion?: string | null
   /** Questions asked beside the session, never part of its conversation. Absent for subagents. */
   sideChat?: SideChatView
   /** Ephemeral: a program outside Kettu, such as a terminal, has the agent's session open. */
@@ -287,6 +293,15 @@ export interface SubagentInfo {
   model?: string
 }
 
+/** 挂起的配置切换正在等待什么结束，或已在重启切换中。 */
+export type PendingConfigWait = 'turn' | 'background' | 'restarting'
+
+/** 配置选项计划切换到的目标值（仅内存态，不持久化）。 */
+export interface PendingConfig {
+  value: string
+  wait: PendingConfigWait
+}
+
 export interface ConfigOption {
   id: string
   name: string
@@ -311,6 +326,8 @@ export interface ConfigOption {
   defaultValue?: boolean | null
   /** Show the option's name beside the model while it is enabled. */
   indicator?: boolean
+  /** 目标切换已预约但尚未生效（例如需等当前回合或后台任务结束后重启进程）。 */
+  pending?: PendingConfig
 }
 
 export function booleanConfigValue(option: ConfigOption): boolean | undefined {
@@ -340,6 +357,31 @@ export interface SlashCommand {
   name: string
   description: string
   inputHint?: string
+  /** Set on Kettu's own commands; an agent's carry none. */
+  source?: CommandSource
+}
+
+/**
+ * Where a command Kettu keeps in a file comes from: a plugin, whose `name` qualifies its commands
+ * as `name:command`, or the user's own folder.
+ */
+export type CommandOrigin =
+  { kind: 'plugin'; id: string; name: string; title: string } | { kind: 'user' }
+
+/** What qualifies a command's name where two share it: `name:command`. */
+export function commandQualifier(origin: CommandOrigin): string {
+  return origin.kind === 'plugin' ? origin.name : 'user'
+}
+
+/** Where a command in the slash list comes from; `kettu` is one the app itself provides. */
+export type CommandSource = CommandOrigin | { kind: 'kettu' }
+
+/** A command of Kettu's as the host expanded it: the message the agent got in its place. */
+export interface CommandRun {
+  /** The command's own name, without any plugin before it. */
+  name: string
+  origin: CommandOrigin
+  sent: string
 }
 
 export type ThreadEntry =
@@ -370,6 +412,8 @@ export type ThreadEntry =
        * Codex's turn id, which an edit from this message cuts the agent's session at.
        */
       agentRef?: string
+      /** What plugins attached to the message before it went to the agent; the text stays as written. */
+      attached?: PluginAttached[]
     }
   | {
       kind: 'agent'
@@ -392,9 +436,10 @@ export type ThreadEntry =
       severity: 'info' | 'warning' | 'error'
       title: string
       description?: string
-      // The notice ends the turn: the agent exited mid-turn, its model provider is out of credit,
-      // or the turn of a message failed otherwise.
-      cause?: 'agent_stopped' | 'out_of_credit' | 'turn_failed'
+      // Each but reports_paused ends the turn: the agent exited mid-turn, its model provider is out
+      // of credit, or the turn of a message failed otherwise. reports_paused: reports from the
+      // sessions it started stopped waking this one.
+      cause?: 'agent_stopped' | 'out_of_credit' | 'turn_failed' | 'reports_paused'
       model?: string // out_of_credit: the session's model when the turn failed
       // The agent's entry before it, to put it back after a replay: set on the notices Kettu
       // adds itself, never on an agent's, which its replay sends again.
@@ -431,6 +476,34 @@ export type ThreadEntry =
   | MarketPublishEntry // Kettu's own record of a publish to the Kettu Marketplace, and its outcome
   | SettingsChangeEntry // Kettu's own record of an agent's change to Kettu's settings, and its answer
   | TaskDeliveryEntry // Kettu's own record of a task this session started ending, and what it delivered
+  | PluginDenialEntry // Kettu's own record of a plugin denying a permission request
+
+/** What one plugin attached to a message before it was sent. */
+export interface PluginAttached {
+  pluginId: string
+  /** The plugin's title. */
+  plugin: string
+  /**
+   * `failed` says why a mentioned item could not be added (`text` is then empty): the plugin did
+   * not answer in time, was unavailable, or answered with what was not content. `detail` is the
+   * plugin's own message for it, untrusted text; entries stored before it have none.
+   */
+  items: { title?: string; text: string; failed?: string; detail?: string }[]
+}
+
+/**
+ * A plugin denied a permission request, which the agent was told. `request` is the command, or the
+ * tool's title for any other request; `after`: the agent's entry before it, for a replay.
+ */
+export interface PluginDenialEntry {
+  kind: 'plugin_denial'
+  id: string
+  pluginId: string
+  plugin: string
+  request: string
+  reason: string
+  after: string | null
+}
 
 /**
  * Where another agent took the session over: from here on its turns are that agent's. `turns` of
@@ -730,7 +803,8 @@ export interface MarketPublishChange {
  */
 export type MarketPublishOutcome =
   | { kind: 'publishing' | 'unlisting' }
-  | { kind: 'published'; listingId: string; handle: string; version: string }
+  // `held`: the service stored the version and lists it only after a review.
+  | { kind: 'published'; listingId: string; handle: string; version: string; held?: true }
   | { kind: 'unlisted' }
   | { kind: 'failed'; message: string; problems: MarketProblem[] }
   | { kind: 'later' | 'expired' | 'ended' | 'interrupted' }
@@ -777,6 +851,17 @@ export interface MarketPublishEntry {
   publisher: { suggested: string } | null
   /** A workflow's flowchart, as its `workflow.yaml` reads; absent for the other kinds. */
   workflow?: Workflow
+  /**
+   * A Kettu plugin's script, if it has one, with the permissions it declares, and what an install
+   * would leave out of the package; absent for the other kinds.
+   */
+  plugin?: {
+    script: { entry: string; api: number } | null
+    permissions: string[]
+    notes: string[]
+  }
+  /** A plugin Kettu made from a Claude Code or Codex plugin: what came over and what did not. */
+  converted?: PluginConversion
   /**
    * The task whose workflow this generalizes, when its agent says so: whether the steps and arrows
    * stayed, the agent's sentence on what it changed, and both files to compare.
@@ -917,13 +1002,16 @@ export interface ToolEntry {
   locations: { path: string; line?: number }[]
   permission: PendingPermission | null
   permissionResult:
-    // by: answered within a scope; device: answered on a paired device; name: a question's answer;
+    // by: answered within a scope; device: answered on a paired device; relayed: answered through
+    // a plugin's channel; name: a question's answer;
     // questions: what each question of an ask got, in the agent's order
     | {
         optionId: string
         kind: PermissionKind
         by?: 'routine' | 'task'
         device?: FromDevice
+        // A plugin relayed the answer, which the user gave where `from` says
+        relayed?: { plugin: string; from: string | null }
         name?: string
         questions?: AnsweredQuestion[]
         // The note sent with the answer, such as what to change in a plan
@@ -1056,7 +1144,10 @@ export interface AnsweredQuestion {
 
 export type PermissionKind = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
 export type StopReason = 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'
-export type UserContent = { type: 'text'; text: string } | { type: 'ref'; ref: ContentRef }
+export type UserContent =
+  // `command`: the text starts with one of Kettu's commands, which the host expanded; the text
+  // stays what the user typed.
+  { type: 'text'; text: string; command?: CommandRun } | { type: 'ref'; ref: ContentRef }
 export type ContentRef =
   | { kind: 'image'; mimeType: string; data: string }
   // An image the host keeps in its thread store, whose bytes `sessions.blob` reads by `blob`,
@@ -1072,6 +1163,9 @@ export type ContentRef =
   | { kind: 'terminal'; terminalId: string; name: string }
   | { kind: 'page'; tabId: string; name: string }
   | { kind: 'device'; deviceId: string; name: string }
+  // An item a plugin's mention source offered that the user chose: the plugin adds its content to
+  // the message when it is sent. `word` is what the text names it by after the `@`.
+  | { kind: 'plugin'; pluginId: string; source: string; item: string; word: string; name: string }
   | { kind: 'unsupported'; label: string }
 
 export interface Attachment {
@@ -1423,6 +1517,14 @@ function isContentRef(value: unknown): value is ContentRef {
       return typeof value.tabId === 'string' && typeof value.name === 'string'
     case 'device':
       return typeof value.deviceId === 'string' && typeof value.name === 'string'
+    case 'plugin':
+      return (
+        typeof value.pluginId === 'string' &&
+        typeof value.source === 'string' &&
+        typeof value.item === 'string' &&
+        typeof value.word === 'string' &&
+        typeof value.name === 'string'
+      )
     case 'attachment':
       return isAttachment(value.attachment)
     case 'unsupported':
@@ -1453,9 +1555,33 @@ export function isAttachment(value: unknown): value is Attachment {
   )
 }
 
+function isCommandOrigin(value: unknown): value is CommandOrigin {
+  if (!isRecord(value)) return false
+  if (value.kind === 'user') return true
+  return (
+    value.kind === 'plugin' &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.title === 'string'
+  )
+}
+
+function isCommandRun(value: unknown): value is CommandRun {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    typeof value.sent === 'string' &&
+    isCommandOrigin(value.origin)
+  )
+}
+
 export function isUserContent(value: unknown): value is UserContent {
   if (!isRecord(value)) return false
-  if (value.type === 'text') return typeof value.text === 'string'
+  if (value.type === 'text') {
+    return (
+      typeof value.text === 'string' && (value.command === undefined || isCommandRun(value.command))
+    )
+  }
   return value.type === 'ref' && isContentRef(value.ref)
 }
 
@@ -1515,7 +1641,8 @@ export function isThreadEntry(value: unknown): value is ThreadEntry {
     case 'user':
       return (
         isListOf(value.content, isUserContent) &&
-        (value.agentRef === undefined || typeof value.agentRef === 'string')
+        (value.agentRef === undefined || typeof value.agentRef === 'string') &&
+        (value.attached === undefined || isListOf(value.attached, isPluginAttached))
       )
     case 'session_message':
       return isListOf(value.content, isUserContent)
@@ -1554,7 +1681,8 @@ export function isThreadEntry(value: unknown): value is ThreadEntry {
         (value.cause === undefined ||
           value.cause === 'agent_stopped' ||
           value.cause === 'out_of_credit' ||
-          value.cause === 'turn_failed') &&
+          value.cause === 'turn_failed' ||
+          value.cause === 'reports_paused') &&
         (value.model === undefined || typeof value.model === 'string') &&
         (value.after === undefined || value.after === null || typeof value.after === 'string')
       )
@@ -1710,6 +1838,14 @@ export function isThreadEntry(value: unknown): value is ThreadEntry {
           value.outcome === 'timeout') &&
         (value.after === null || typeof value.after === 'string')
       )
+    case 'plugin_denial':
+      return (
+        typeof value.pluginId === 'string' &&
+        typeof value.plugin === 'string' &&
+        typeof value.request === 'string' &&
+        typeof value.reason === 'string' &&
+        (value.after === null || typeof value.after === 'string')
+      )
     case 'task_delivery':
       return (
         typeof value.taskId === 'string' &&
@@ -1725,6 +1861,23 @@ export function isThreadEntry(value: unknown): value is ThreadEntry {
     default:
       return false
   }
+}
+
+function isPluginAttached(value: unknown): value is PluginAttached {
+  return (
+    isRecord(value) &&
+    typeof value.pluginId === 'string' &&
+    typeof value.plugin === 'string' &&
+    isListOf(
+      value.items,
+      (item): item is PluginAttached['items'][number] =>
+        isRecord(item) &&
+        typeof item.text === 'string' &&
+        (item.title === undefined || typeof item.title === 'string') &&
+        (item.failed === undefined || typeof item.failed === 'string') &&
+        (item.detail === undefined || typeof item.detail === 'string'),
+    )
+  )
 }
 
 function isTaskDeliverable(value: unknown): value is TaskDeliverable {
@@ -1748,19 +1901,65 @@ function isTaskDeliverable(value: unknown): value is TaskDeliverable {
   }
 }
 
-/** Merges consecutive text appends to the same entry, as the host does before a flush. */
+/**
+ * Merges what applies the same as one patch, as the host does before a flush: consecutive text
+ * appends to an entry, consecutive session updates, and an entry update into the entry's earlier
+ * update when no patch between them touches that entry or removes entries. Patches keep their
+ * order and none is changed; a merged one is a new object.
+ */
 export function coalescePatches(patches: readonly Patch[]): Patch[] {
   const out: Patch[] = []
+  // The index in `out` of each entry's latest update that nothing has touched since.
+  const open = new Map<string, number>()
   for (const patch of patches) {
     const last = out[out.length - 1]
-    if (
-      patch.op === 'entry.appendText' &&
-      last?.op === 'entry.appendText' &&
-      last.id === patch.id
-    ) {
-      out[out.length - 1] = { op: 'entry.appendText', id: patch.id, text: last.text + patch.text }
-    } else {
-      out.push(patch)
+    switch (patch.op) {
+      case 'entry.appendText':
+        open.delete(patch.id)
+        if (last?.op === 'entry.appendText' && last.id === patch.id) {
+          out[out.length - 1] = {
+            op: 'entry.appendText',
+            id: patch.id,
+            text: last.text + patch.text,
+          }
+        } else {
+          out.push(patch)
+        }
+        break
+      case 'entry.update': {
+        const at = open.get(patch.id)
+        const earlier = at === undefined ? undefined : out[at]
+        if (at !== undefined && earlier?.op === 'entry.update') {
+          out[at] = {
+            op: 'entry.update',
+            id: patch.id,
+            changes: { ...earlier.changes, ...patch.changes } as EntryChanges,
+          }
+        } else {
+          open.set(patch.id, out.length)
+          out.push(patch)
+        }
+        break
+      }
+      case 'session.update':
+        if (last?.op === 'session.update') {
+          out[out.length - 1] = {
+            op: 'session.update',
+            changes: { ...last.changes, ...patch.changes },
+          }
+        } else {
+          out.push(patch)
+        }
+        break
+      case 'entry.add':
+        open.delete(patch.entry.id)
+        out.push(patch)
+        break
+      case 'thread.reset':
+      case 'thread.truncate':
+        open.clear()
+        out.push(patch)
+        break
     }
   }
   return out

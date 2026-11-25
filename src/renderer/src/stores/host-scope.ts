@@ -40,6 +40,7 @@ import {
   createMarketplaceStore,
   marketConnectionChanged,
   marketKeysChanged,
+  marketPluginsChanged,
   useMarketplaceStore,
   type MarketplaceStoreHook,
 } from './marketplace'
@@ -183,6 +184,9 @@ export function hostScopeEvent(hostId: string, event: HostEvent | HostAdminEvent
       break
     case 'market.publishedChanged':
       marketPublishedChanged(other.scope.hostId)
+      break
+    case 'plugins.changed':
+      marketPluginsChanged(other.scope.useMarketplaceStore)
       break
   }
 }
@@ -378,6 +382,7 @@ function createScope(hostId: string): OtherScope {
     reset: () => done(admin('remote.reset')),
     retryDirect: () => done(admin('remote.retryDirect')),
     retryRelay: () => done(admin('remote.retryRelay')),
+    useOwnRelay: (input) => admin('remote.useOwnRelay', input),
     onChanged: (listener) => listen('remote.changed', (event) => listener(event.status)),
     onPairing: (listener) => listen('remote.pairing', (event) => listener(event.event)),
   }

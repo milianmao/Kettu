@@ -56,12 +56,21 @@ import {
   useGitStore,
 } from '@renderer/stores/git'
 import { loadGitHubStar, receiveGitHubStar } from '@renderer/stores/github-star'
-import { marketConnectionChanged, marketKeysChanged } from '@renderer/stores/marketplace'
+import {
+  marketConnectionChanged,
+  marketKeysChanged,
+  marketPluginsChanged,
+} from '@renderer/stores/marketplace'
 import { marketPublishedChanged } from '@renderer/stores/market-published'
+import { loadKettuCommands } from '@renderer/stores/kettu-commands'
+import { pluginSurfacesChanged } from '@renderer/stores/plugin-surfaces'
+import { loadKettuRoles } from '@renderer/stores/kettu-roles'
+import { loadPluginRefs } from '@renderer/stores/plugin-refs'
 import { memoryChanged } from '@renderer/stores/memory'
 import { useProjectsStore } from '@renderer/stores/projects'
 import { routinesHostClosed, routinesHostOpened, useRoutinesStore } from '@renderer/stores/routines'
 import { useIdleReleaseStore } from '@renderer/stores/idle-release'
+import { hostLoadClosed, hostLoadOpened, receiveLoad } from '@renderer/stores/host-load'
 import { useWorkflowsStore } from '@renderer/stores/workflows'
 import { useSuggestionsStore } from '@renderer/stores/workflow-suggestions'
 import { tasksHostClosed, tasksHostOpened, useTasksStore } from '@renderer/stores/tasks'
@@ -72,7 +81,11 @@ import { initHosts, loadHosts, useHostsStore } from '@renderer/stores/hosts'
 import { initRemote } from '@renderer/stores/remote'
 import { initSharing } from '@renderer/stores/sharing'
 import { initTerminals } from '@renderer/stores/terminals'
-import { initThemes } from '@renderer/stores/themes'
+import {
+  followUninstalledPluginThemes,
+  initThemes,
+  leaveUninstalledPluginTheme,
+} from '@renderer/stores/themes'
 import { keepWatched, receiveBatch, rewatchAll } from '@renderer/stores/threads'
 import { forgetViewers, receiveViewers } from '@renderer/stores/viewers'
 import { initUpdates } from '@renderer/stores/updates'
@@ -178,10 +191,21 @@ function onHostEvent(event: HostEvent, hostId: string | null = null): void {
     case 'idleRelease.changed':
       useIdleReleaseStore.getState().receive(hostId, event.state)
       return
+    case 'host.load':
+      receiveLoad(hostId, event.load)
+      return
   }
   receiveArtifactEvent(event, hostId)
   if (event.type === 'artifacts.changed') artifactsChanged(hostId)
   if (event.type === 'memory.changed') memoryChanged(hostId)
+  if (event.type === 'plugins.changed') {
+    void loadKettuCommands(hostId)
+    void loadKettuRoles(hostId)
+    pluginSurfacesChanged(hostId)
+    void loadPluginRefs(hostId)
+    // A plugin uninstalled while off takes its chosen theme with it, though no theme changed.
+    if (hostId === null) void leaveUninstalledPluginTheme()
+  }
   // The rest is each host's own: another host's goes to its Settings, if they have shown it.
   if (hostId !== null && event.type === 'usage.changed') usageChanged(hostId)
   // Only this window's own host is asked to star, as the prompts show its record.
@@ -208,6 +232,9 @@ function onHostEvent(event: HostEvent, hostId: string | null = null): void {
       break
     case 'market.connectionChanged':
       marketConnectionChanged(event)
+      break
+    case 'plugins.changed':
+      marketPluginsChanged()
       break
     case 'market.publishedChanged':
       marketPublishedChanged(null)
@@ -245,6 +272,7 @@ function loadAgents(): Promise<void> {
 /** Loads everything the shell shows; also runs after the agent host comes back. */
 export async function loadHostState(): Promise<void> {
   useIdleReleaseStore.getState().reload(null)
+  hostLoadOpened(null)
   await Promise.allSettled([
     loadSessionState(),
     loadAgents(),
@@ -390,6 +418,7 @@ export function bootstrap(): Promise<unknown> {
 
   const settingsReady = initSettings()
   const themesReady = initThemes()
+  followUninstalledPluginThemes()
   void initRemote()
   // A host without them, as the daemon, is never asked.
   whenHostHas('sharing', () => void initSharing())
@@ -409,6 +438,7 @@ export function bootstrap(): Promise<unknown> {
         tasksHostOpened(hostId)
         hostScopeOpened(hostId)
         hostRestarted(hostId)
+        hostLoadOpened(hostId)
         rewatchAll((sessionId) => sessionHost(sessionId) === hostId)
         showFront(true)
         rewatchGit(hostId)
@@ -418,6 +448,7 @@ export function bootstrap(): Promise<unknown> {
         artifactsHostClosed(hostId)
         routinesHostClosed(hostId)
         tasksHostClosed(hostId)
+        hostLoadClosed(hostId)
       },
       resync: (hostId) => rewatchAll((sessionId) => sessionHost(sessionId) === hostId),
     })

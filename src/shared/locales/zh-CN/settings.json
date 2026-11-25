@@ -13,6 +13,7 @@
     "artifacts": "产物",
     "sharing": "分享",
     "remote": "远程访问",
+    "plugins": "插件",
     "browser": "浏览器",
     "harnesses": "Harness",
     "memory": "记忆",
@@ -80,6 +81,11 @@
       "name": "套餐限额重置后自动继续",
       "description": "被套餐限额停下的会话，在窗口重置后自己接着做。",
       "keywords": "套餐 限额 重置 自动继续 session"
+    },
+    "promptSuggestions": {
+      "name": "建议下一条消息",
+      "description": "一轮结束后，空着的输入框显示你接下来可能要说的话，按 Tab 填入。目前只有 Claude Code，借用它的提示词缓存。",
+      "keywords": "建议 预测 下一条 消息 补全 输入框 suggestion predict next prompt tab autocomplete"
     },
     "agentPasswords": {
       "name": "允许智能体输入密码",
@@ -171,6 +177,7 @@
       "builtIn": "内置",
       "file": "文件",
       "catalog": "主题库",
+      "plugin": "来自 {{plugin}}",
       "more": "“{{name}}”的更多操作",
       "export": "导出为文件…",
       "exported": "已将 {{file}} 保存到 {{folder}}",
@@ -1226,8 +1233,27 @@
       "name": "GitHub",
       "keywords": "源代码 仓库 许可证 反馈 问题 source code repository license issue bug"
     },
+    "issues": {
+      "name": "问题和建议",
+      "description": "在 GitHub 上提 issue，用什么语言都可以。",
+      "keywords": "反馈 联系 问题 建议 功能 feedback contact bug feature request issue",
+      "open": "新建 issue"
+    },
+    "email": {
+      "name": "邮箱",
+      "description": "hello@kettu.sh",
+      "keywords": "邮箱 邮件 联系 地址 反馈 email mail contact",
+      "copy": "复制邮箱地址"
+    },
+    "x": {
+      "name": "X",
+      "description": "@KettuAI",
+      "keywords": "推特 关注 动态 联系 x twitter follow",
+      "open": "关注"
+    },
     "groups": {
-      "updates": "更新"
+      "updates": "更新",
+      "contact": "联系我们"
     }
   },
   "pages": {
@@ -1242,12 +1268,13 @@
     "git": "顶栏的分支与更改、PR 和它的检查结果，都靠下面两个工具。",
     "advanced": "网络代理、诊断信息，以及 Kettu 保存在这台电脑上的数据。",
     "advanced_web": "网络代理、诊断信息，以及 Kettu 保存在 {{host}} 上的数据。",
-    "about": "Kettu 的版本和更新。",
+    "about": "Kettu 的版本、更新和联系方式。",
     "archived": "从侧边栏移走但仍保留。恢复后回到原来的位置。",
     "artifacts": "页面要读取项目文件或向你的智能体提问时会先问你。只保存自己数据的页面不会问。",
     "sharing": "把产物发布为链接，发布到 Kettu 或你自己的 Cloudflare 账号；发布到 Kettu 的可以选择谁能打开。",
     "remote": "在 iPhone、iPad 或另一台电脑上的 Kettu 里使用这台电脑的会话。",
     "remote_web": "在 iPhone、iPad 或另一台电脑上的 Kettu 里使用 {{host}} 的会话。",
+    "plugins": "你装的插件的设置，以及每个插件的脚本能做什么。装和卸载插件在市场里。",
     "browser": "登录状态、智能体给出的链接在哪里打开，以及它们可以使用的网站。",
     "browserWeb": "智能体回复中的链接会在新标签页中打开。",
     "harnesses": "智能体跑在上面的程序：Claude Code、Codex 等。Kettu 先用你电脑上装好的，没有时再替你装一份。",
@@ -1383,7 +1410,9 @@
       "ssh": "SSH",
       "sshAt": "SSH · {{target}}",
       "relay": "Kettu 中继",
-      "relayAt": "Kettu 中继 · {{region}}"
+      "relayAt": "Kettu 中继 · {{region}}",
+      "ownRelay": "自己的中继",
+      "ownRelayAt": "自己的中继 · {{host}}"
     },
     "failed": {
       "not_connected": "{{name}} 没有连上，等它在线后再试。",
@@ -1619,7 +1648,9 @@
         "keywords": "电脑 主机 切换 打开 其他 添加 配对 computers hosts switch",
         "open": "打开",
         "add": "添加电脑…",
-        "addDescription": "让这个浏览器和另一台登录这个账号的电脑配对。"
+        "addDescription": "让这个浏览器和另一台登录这个账号的电脑配对。",
+        "descriptionRelay": "这个浏览器经这台中继配对过的其他电脑。打开一台就在这里用它，代替 {{name}}。",
+        "addDescriptionRelay": "把这个浏览器和另一台用这台中继的电脑配对。"
       }
     },
     "account": {
@@ -1660,6 +1691,41 @@
         "rejected": "{{name}} 没有添加这台电脑。",
         "unreachable": "经 Kettu 中继连不上 {{name}}。确认它开着机并已登录，再试一次。"
       }
+    },
+    "load": {
+      "group": "负载",
+      "live": "实时",
+      "cpu": "CPU",
+      "memory": "内存",
+      "mem": "内存",
+      "disk": "磁盘",
+      "network": "网络",
+      "battery": "电池",
+      "cpuLabel": "CPU 使用率",
+      "memoryLabel": "内存使用率",
+      "cores_other": "{{count}} 核",
+      "coresLimit_other": "限制为 {{count}} 核",
+      "memoryOf": "用了 {{used}}，共 {{total}}",
+      "memoryState": {
+        "plenty": "宽裕",
+        "tight": "紧张",
+        "critical": "危急"
+      },
+      "free": "可用",
+      "diskOf": "共 {{total}}",
+      "io": "读 {{read}} · 写 {{write}}",
+      "networkSub": "↓ 接收 · ↑ 发送",
+      "networkLabel": "接收 {{receive}}，发送 {{send}}",
+      "batteryPercent": "电池 {{percent}}%",
+      "onBatteryPercent": "正在用电池，剩 {{percent}}%",
+      "charging": "正在充电",
+      "onBattery": "正在用电池",
+      "pluggedIn": "已接电源",
+      "left": "还能用 {{time}}",
+      "minutes": "{{m}} 分钟",
+      "hoursMinutes": "{{h}} 小时 {{m}} 分钟",
+      "old": "更新 {{name}} 上的 Kettu 后，这里才能显示它的负载。",
+      "note": "只读这几项总数：CPU、内存、磁盘、网络和电池，而且只在你看着时读。它们只在 {{name}} 和你自己的设备之间端到端加密地传，不留存，Kettu 的服务器也收不到。"
     }
   },
   "remote": {
@@ -1688,7 +1754,8 @@
       "serviceKey_web": "{{host}} 的密钥存在只有它的用户能读的文件里，因为开机就启动的服务不能指望钥匙串已经解锁。",
       "offLine": "已关闭",
       "firewall": "同一网络里的设备会直接连到这台电脑，所以系统可能会问一次是否允许 Kettu 接受传入连接。",
-      "relay": "在哪都连得上"
+      "relay": "在哪都连得上",
+      "ownRelay": "经 {{host}}"
     },
     "hostName": {
       "name": "这台电脑的名字",
@@ -1827,7 +1894,9 @@
       "added": "已添加“{{name}}”",
       "description": "只添加一台设备。码过期前，任何看到它的人都能用它。",
       "description_web": "只添加一台设备。码过期前，任何看到它的人都能用它。",
-      "expiresIn": "{{time}} 后过期"
+      "expiresIn": "{{time}} 后过期",
+      "ownRelay": "经 {{host}} 连接：配对码里带着你的中继，设备不用登录账号，也不用设置什么。",
+      "browserHintOwnRelay": "也可以在任何网络的浏览器里打开链接：网页版由你的中继提供。"
     },
     "device": {
       "rename": "改名",
@@ -1904,13 +1973,10 @@
     "groups": {
       "permissions": "权限",
       "danger": "危险区",
-      "advanced": "高级"
+      "relay": "中继"
     },
     "relay": {
-      "name": "使用 Kettu 中继",
-      "description": "这台电脑登录着 Kettu 账号时，登录同一个账号的设备在哪都连得上它。关掉后设备只能直连。",
-      "description_web": "{{host}} 登录着 Kettu 账号时，登录同一个账号的设备在哪都连得上它。关掉后设备只能直连。",
-      "keywords": "中继 云 远程 任何地方 区域 账号 relay",
+      "keywords": "中继 云 远程 任何地方 区域 账号 自建 自己的中继 服务器 访问密钥 relay",
       "regions": "中继区域",
       "regionsDescription": "同时登录每一个，设备用最先接上的那个。",
       "regionsNone": "登录中继后显示。",
@@ -1935,7 +2001,85 @@
         "busy": "现在连接太多。Kettu 稍后会再试。"
       },
       "signInHint": "登录 Kettu 账号后，在哪都连得上这台电脑。直连照样能用。",
-      "signInHint_web": "在 {{host}} 上登录 Kettu 账号后，在哪都连得上它。直连照样能用。"
+      "signInHint_web": "在 {{host}} 上登录 Kettu 账号后，在哪都连得上它。直连照样能用。",
+      "group": "中继",
+      "groupDescription": "设备在别的网络里怎么连到这台电脑：Kettu 中继、你自己运行的中继，或者不用中继。",
+      "groupDescription_web": "设备在别的网络里怎么连到 {{host}}：Kettu 中继、你自己运行的中继，或者不用中继。",
+      "onlyKettu": "只在用 Kettu 中继时可用。",
+      "choice": {
+        "kettu": {
+          "name": "Kettu 中继",
+          "short": "Kettu 中继",
+          "description": "由 Kettu 运行。这台电脑和你的设备登录同一个 Kettu 账号。",
+          "description_web": "由 Kettu 运行。{{host}} 和你的设备登录同一个 Kettu 账号。"
+        },
+        "own": {
+          "name": "自己的中继",
+          "short": "自己的中继",
+          "description": "在你自己的服务器上运行的中继，不需要 Kettu 账号。",
+          "descriptionLocal": "在你自己的服务器上运行的中继，什么都不发给 Kettu。",
+          "older": "把这台电脑上的 Kettu 更新后才能用自己的中继。"
+        },
+        "off": {
+          "name": "不用中继",
+          "short": "不用中继",
+          "description": "设备在同一网络、经 VPN 或 SSH 连接。"
+        }
+      },
+      "note": {
+        "switch": "Kettu 先检查中继和密钥，过了才切换。现在在线的设备马上跟过去；其余的下次在同一网络连到这台电脑时跟过去，或者重新添加。",
+        "own": "一次只用一个中继。你的 Kettu 账号照旧把这台电脑的通知发到 iPhone。",
+        "pinned": "电脑和 iPhone 上的 Kettu 应用连得上它。浏览器没法按指纹认证书，要用有域名的中继。",
+        "local": "本地模式下 Kettu 不向自己的服务发送任何东西。中继是你自己的，所以照用。",
+        "switch_web": "Kettu 先检查中继和密钥，过了才切换。现在在线的设备马上跟过去；其余的下次在同一网络连到 {{host}} 时跟过去，或者重新添加。",
+        "own_web": "一次只用一个中继。你的 Kettu 账号照旧把 {{host}} 的通知发到 iPhone。"
+      },
+      "own": {
+        "address": "地址",
+        "addressHint": "粘贴中继启动时打印的链接，密钥会一起填上。",
+        "pinnedHint": "按链接里的指纹认它的证书，用于只有 IP 地址的中继。",
+        "key": "访问密钥",
+        "keyHint": "只存在这台电脑上，设备拿不到。",
+        "keyKept": "留空就继续用结尾是 {{end}} 的密钥。",
+        "noKey": "没有保存",
+        "docs": "怎么运行中继",
+        "docsUrl": "https://github.com/KettuAI/relay/blob/main/docs/deploy.zh-CN.md",
+        "cancel": "取消",
+        "use": "使用这个中继",
+        "checking": "正在检查…",
+        "change": "更换…",
+        "replace": "更换…",
+        "pasteLink": "粘贴新链接…",
+        "connecting": "正在连接 {{host}}…",
+        "lineFailed": "连不上 {{host}}",
+        "refusedHint": "中继拒绝了这台电脑的访问密钥。在下面的“中继”里粘贴它现在打印的链接。",
+        "state": {
+          "noKey": "没有保存访问密钥 · 粘贴中继的链接",
+          "connecting": "正在连接…",
+          "connected": "已连接",
+          "rtt": "{{ms}} ms",
+          "version": "中继 {{version}}",
+          "pinned": "按指纹认证书",
+          "refused": "被拒绝 · 中继换了访问密钥",
+          "busy": "连接太多 · 稍后再试",
+          "unreachable": "连不上 · 稍后再试"
+        },
+        "problem": {
+          "address": "填中继的地址，比如 https://relay.example.com。",
+          "kettu": "这是 Kettu 中继。要用它请选上面的“Kettu 中继”。",
+          "http": "请用 https。只有就在这台电脑上的中继才能用 http。",
+          "key": "填中继打印的访问密钥。",
+          "unreachable": "连不上 {{host}}。看看中继是否在运行，{{port}} 端口是否对外开放。",
+          "certificate": "{{host}} 的证书无效。只有 IP 地址的中继会打印带证书指纹的链接。",
+          "certificatePinned": "它的证书和指纹对不上。粘贴中继现在打印的链接。",
+          "not_kettu": "这个地址不像 Kettu 的中继。",
+          "protocol": "这个中继的协议版本不同。请更新中继或 Kettu。",
+          "no_access_key": "这个中继不收访问密钥。请在服务器上更新 kettu-relay。",
+          "key_refused": "中继拒绝了这个密钥。在中继上运行",
+          "key_refusedEnd": "会打印带当前密钥的链接。"
+        },
+        "keyHint_web": "只存在 {{host}} 上，任何设备（包括这台）都读不回来。"
+      }
     },
     "discoverable": {
       "name": "让账号下的设备找到这台电脑",
@@ -2248,7 +2392,7 @@
       "direct": "同一网络、VPN 或转发的端口上的设备将能直接连到这台电脑。",
       "terminal": "配对的设备将能在这台电脑上运行任何命令。",
       "discoverable": "登录同一个 Kettu 账号的设备将能找到这台电脑并请求添加。",
-      "relay": "设备将能从任何网络经 Kettu 中继连到这台电脑。",
+      "relay": "会改变设备从别的网络经哪个中继连到这台电脑。",
       "proxy": "智能体、npx 和更新都会经过这个代理。",
       "source": "会改变 Kettu 下载更新的来源。"
     }
@@ -2260,5 +2404,60 @@
     "noMonospaceMatch": "没有匹配的等宽字体。",
     "loading": "正在读取已安装的字体…",
     "unavailable": "这个浏览器列不出字体，输入字体名即可使用。"
+  },
+  "plugins": {
+    "back": "插件",
+    "loading": "正在读取插件…",
+    "readFailed": "读不了插件：{{error}}",
+    "retry": "重试",
+    "empty": {
+      "title": "还没有装插件",
+      "hint": "在市场里装的插件会出现在这里，连同它们的设置。"
+    },
+    "notInstalled": "这个插件没有装。",
+    "row": {
+      "open": "打开 {{name}}",
+      "settings_other": "{{count}} 项设置",
+      "noSettings": "没有设置"
+    },
+    "state": {
+      "off": "已关闭",
+      "noScript": "没有脚本",
+      "idle": "脚本待命",
+      "active": "脚本运行中",
+      "disabled": "脚本崩溃太多次，已停用"
+    },
+    "settings": {
+      "heading": "设置",
+      "none": "这个插件没有设置。"
+    },
+    "secret": {
+      "set": "已设置",
+      "notSet": "未设置",
+      "setAction": "设置…",
+      "change": "更改…",
+      "clear": "清除",
+      "save": "保存",
+      "cancel": "取消",
+      "placeholder": "粘贴密钥",
+      "note": "存在这台电脑上。只有这个插件的脚本读得到，智能体读不到。"
+    },
+    "channels": {
+      "hint": "打开的几类通知会发到这里。不选的话什么都不会发。"
+    },
+    "script": {
+      "heading": "它的脚本能做什么",
+      "none": "这个插件不运行脚本。",
+      "nothing": "它的脚本除了自己的设置和存储，什么都不要。",
+      "high": "高风险"
+    },
+    "manage": {
+      "heading": "管理",
+      "enabled": "启用",
+      "uninstallName": "卸载",
+      "uninstallHint": "连同它的设置、密钥和存储的数据一起删除。",
+      "uninstall": "卸载…"
+    },
+    "changeFailed": "改不了 {{name}}：{{error}}"
   }
 }

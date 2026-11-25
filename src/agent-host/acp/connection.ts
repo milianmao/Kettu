@@ -25,7 +25,14 @@ import {
   type SessionUpdate,
   type Stream,
 } from '@agentclientprotocol/sdk/unstable'
-import type { AgentId, ConfigOption, PermissionOption } from '@shared/thread'
+import type { ContextEstimates } from '@shared/context'
+import type {
+  AgentId,
+  ConfigOption,
+  PendingConfig,
+  PermissionOption,
+  TokenTotals,
+} from '@shared/thread'
 import {
   AgentRequestError,
   optionAnswer,
@@ -46,12 +53,14 @@ import {
   type SignInClient,
 } from '../connection'
 import { agentEntryBefore } from '../artifacts/entries'
-import type { MovedAccounts } from '../catalog'
+import type { LaunchSpec, MovedAccounts } from '../catalog'
 import type { AgentTransport, MessageTransport } from '../driver'
+import type { Env } from '../find-command'
 import { t } from '../i18n'
 import { planRevision } from '../plan-revision'
 import {
   addEntry,
+  addTokenTotals,
   isStopReason,
   mergeConfig,
   type MapperContext,
@@ -65,6 +74,7 @@ import {
 } from '../vendor-usage/antigravity'
 import {
   KNOWN_UPDATES,
+  chunkTokens,
   mapAuthStatus,
   mapReportedAuthStatus,
   mapConfig,
@@ -99,6 +109,8 @@ import {
   withFullAccess,
 } from './process-access'
 import { AgyCommands } from './agy-commands'
+import { AgyContextEstimator } from './agy-context'
+import { AgyMetrics, agyStepReader, type AgyStepReader } from './agy-metrics'
 import { systemPromptMeta, takesSystemPromptAppend } from './agy-prompt'
 import { AGY_ELICITATION, askInCard, asksQuestions, OpenAsks } from './agy-questions'
 import {
@@ -116,6 +128,7 @@ import {
   inWholeFile,
   onAgyOwnFiles,
   throughGateway,
+  type AgyAutoAllow,
 } from './agy-tools'
 import { fromCodeMode } from './code-mode'
 import { forkPointMeta, forksAtMessage } from './fork-point'
@@ -187,6 +200,14 @@ export interface AcpOptions {
   movedAccounts?: MovedAccounts
   /** Where agy's sub-agents are read from, its own conversation store unless given. */
   agyStore?: AgyStore
+  /** 启动该代理的可执行命令与参数，用于执行 agy 的只读查询子命令（如 /skills）。 */
+  spec?: LaunchSpec
+  /** 启动该代理时的环境变量。 */
+  env?: Env
+  /** 读取 agy transcript 单步用量的函数，便于单元测试注入。 */
+  agyStepReader?: AgyStepReader
+  /** agy 上下文定义估算器，便于单元测试注入。 */
+  agyContext?: AgyContextEstimator
 }
 
 export type AcpHooks = ConnectionHooks & AcpOptions
@@ -315,8 +336,10 @@ interface ProcessAccess {
   full: boolean
   /** Its options as Kettu last showed them, Full access among them. */
   config: ConfigOption[]
-  /** The mode chosen while a turn ran that needs a restart, made once the turn ends. */
+  /** 等待当前回合或后台任务结束后切换到的目标模式。 */
   pending: string | null
+  /** 正在重启 agy 进程切换到的目标模式。 */
+  switching: string | null
   /** The restart under way, which the session's next requests wait for. */
   restarting: Promise<void> | null
 }
@@ -398,8 +421,8 @@ export class AcpConnection implements AgentConnection {
   private removal: Removal | null = null
   /** Hidden sessions an agent keeps once prompted: open to read, never to prompt. */
   private readonly unprompted = new Set<string>()
-  /** agy's names for the tools each session's MCP servers run without asking. */
-  private readonly autoAllowed = new Map<string, ReadonlySet<string>>()
+  /** agy 会话各权限模式下自动放行的 MCP 工具集合。 */
+  private readonly autoAllowed = new Map<string, AgyAutoAllow>()
   /** The version the agent named in `initialize`. */
   private version: string | null = null
   /** How the agent names the MCP tools it calls, once `initialize` has answered. */
@@ -411,6 +434,8 @@ export class AcpConnection implements AgentConnection {
   private readonly openAsks = new OpenAsks()
   /** Sessions with a prompt in flight. */
   private readonly prompting = new Set<string>()
+  /** The tokens of the model calls of each prompt in flight, as its message chunks carried them. */
+  private readonly chunkUsage = new Map<string, TokenTotals>()
   /** agy's plan files, by session. */
   private readonly agyPlans = new Map<string, AgyPlans>()
   /** The mode each agy session was in before it entered Plan mode, which a plan builds in. */
@@ -433,6 +458,10 @@ export class AcpConnection implements AgentConnection {
   private readonly subagentParents = new Map<string, string>()
   /** Sub-agents opened again whose replay Kettu already shows. */
   private readonly muted = new Set<string>()
+  /** agy 会话的单步请求计时器，结合 transcript.jsonl 输出 TPS 与最近一次请求统计。 */
+  private readonly agyMetrics: AgyMetrics | null = null
+  /** 仅在 Antigravity 连接上挂载：估算当前会话可加载的 Skills 与 MCP 工具定义大小。 */
+  readonly readContextEstimates?: (sessionId: string, cwd: string) => Promise<ContextEstimates>
 
   private constructor(
     private readonly transport: AcpTransport,
@@ -453,11 +482,12 @@ export class AcpConnection implements AgentConnection {
         // A call through Kettu's gateway asks and shows as the tool it runs.
         const asked = this.agy ? throughGateway(ctx.params.toolCall) : ctx.params.toolCall
         if (this.agy) {
-          // agy asks for every MCP tool; Kettu's own run without asking, as Claude Code's do.
+          // agy 对所有 MCP 工具都会请求授权；Kettu 按全模式白名单及 Auto 模式下可回滚规则自动放行。
           const optionId = agyAllowOnce(
             asked,
             ctx.params.options,
             this.autoAllowed.get(ctx.params.sessionId),
+            this.agyMode(ctx.params.sessionId) === 'auto',
           )
           if (optionId) return { outcome: { outcome: 'selected', optionId } }
         }
@@ -536,6 +566,22 @@ export class AcpConnection implements AgentConnection {
         if (!ctx.method.startsWith('$/')) hooks.ignored(null, `notification ${ctx.method}`)
       })
     this.connection = app.connect(this.tap(transport.stream))
+    if (this.agy) {
+      this.agyMetrics = new AgyMetrics(hooks.agyStepReader ?? agyStepReader(), {
+        target: (id) => this.targets.get(id),
+      })
+      const estimator =
+        hooks.agyContext ??
+        new AgyContextEstimator({
+          program: hooks.spec?.command,
+          args: hooks.spec?.args.filter((arg) => arg !== 'acp'),
+          env: hooks.env,
+        })
+      this.readContextEstimates = (sessionId, cwd) => {
+        const opened = this.agyOpened.get(sessionId)
+        return estimator.read(cwd, opened?.options.mcpServers ?? [])
+      }
+    }
   }
 
   static connect(transport: AcpTransport | AgentTransport, hooks: AcpHooks): AcpConnection {
@@ -581,6 +627,21 @@ export class AcpConnection implements AgentConnection {
     if (this.agy) this.autoAllowed.set(sessionId, agyAutoAllowed(options.mcpServers))
   }
 
+  /** 读取 agy 会话（含子智能体继承自父会话）当前生效的权限模式值。 */
+  private agyMode(sessionId: string): string | null {
+    let id: string | undefined = sessionId
+    const seen = new Set<string>()
+    while (id && !seen.has(id)) {
+      seen.add(id)
+      const mode =
+        currentMode(this.targets.get(id)?.context().thread.session.config ?? []) ??
+        currentMode(this.processAccess.get(id)?.config ?? [])
+      if (mode !== null) return mode
+      id = this.subagentParents.get(id)
+    }
+    return null
+  }
+
   /** Whether the agent is agy, whose tool calls take a shape of their own. */
   private get agy(): boolean {
     return this.hooks.agentId === 'antigravity'
@@ -604,11 +665,14 @@ export class AcpConnection implements AgentConnection {
     if (this.muted.has(sessionId)) return
     this.learnChild(sessionId, update)
     const target = this.targets.get(sessionId)
+    this.countChunk(sessionId, update, target)
     if (target) {
       this.notePlanWrite(sessionId, update)
+      const replaying = target.context().replaying
       target.apply(this.withAccess(sessionId, this.map(update, target.context())))
       this.noteCommand(sessionId, update, target)
-      this.subagents?.noted(sessionId, update, target.context().replaying)
+      this.subagents?.noted(sessionId, update, replaying)
+      this.agyMetrics?.onUpdate(sessionId, update, replaying)
       return
     }
     const collector = this.collectors.get(sessionId)
@@ -637,6 +701,14 @@ export class AcpConnection implements AgentConnection {
       this.pending.set(sessionId, entry)
     }
     if (entry.updates.length < PENDING_UPDATES) entry.updates.push(update)
+  }
+
+  /** Adds a model call's tokens that a chunk of a turn in flight carries, never a replayed one's. */
+  private countChunk(sessionId: string, update: SessionUpdate, target?: SessionTarget): void {
+    if (!this.prompting.has(sessionId) || target?.context().replaying) return
+    const tokens = chunkTokens(update)
+    if (!tokens) return
+    this.chunkUsage.set(sessionId, addTokenTotals(this.chunkUsage.get(sessionId) ?? null, tokens))
   }
 
   private learnChild(sessionId: string, update: SessionUpdate): void {
@@ -678,6 +750,7 @@ export class AcpConnection implements AgentConnection {
     this.agyPlans.delete(sessionId)
     this.agyBuildModes.delete(sessionId)
     this.agyCommands.delete(sessionId)
+    this.agyMetrics?.forget(sessionId)
     this.unregistered.add(sessionId)
     if (this.unregistered.size > CLOSED_SESSIONS) {
       this.unregistered.delete(this.unregistered.values().next().value!)
@@ -702,6 +775,7 @@ export class AcpConnection implements AgentConnection {
   }
 
   close(): void {
+    this.agyMetrics?.stop()
     this.connection.close()
     this.transport.close()
   }
@@ -910,7 +984,10 @@ export class AcpConnection implements AgentConnection {
     this.readPlan(response._meta)
     this.allowWithoutAsking(response.sessionId, options)
     if (options.hidden && !promptsHidden(this.removal)) this.unprompted.add(response.sessionId)
-    else this.openedAgy(response.sessionId, cwd, options)
+    else {
+      this.openedAgy(response.sessionId, cwd, options)
+      this.agyMetrics?.onNewSession(response.sessionId)
+    }
     return {
       sessionId: response.sessionId,
       config: this.opened(response.sessionId, cwd, options, config, full),
@@ -936,6 +1013,7 @@ export class AcpConnection implements AgentConnection {
     this.readPlan(response._meta)
     this.allowWithoutAsking(sessionId, options)
     this.openedAgy(sessionId, cwd, options)
+    this.agyMetrics?.onExistingSession(sessionId)
     await this.subagents?.replay(sessionId)
     return {
       config: this.opened(
@@ -953,17 +1031,32 @@ export class AcpConnection implements AgentConnection {
     options: SessionOptions = {},
   ): Promise<SessionSetup> {
     const meta = this.meta(options)
-    const response = await this.call(() =>
-      this.connection.agent.request(methods.agent.session.resume, {
-        sessionId,
-        cwd,
-        mcpServers: mcpServers(options.mcpServers),
-        ...(meta ? { _meta: meta } : {}),
-      }),
-    )
+    const open = (flagged: boolean) => {
+      const sent = flagged ? { ...meta, [SESSION_FLAG_META]: true } : meta
+      return this.call(() =>
+        this.connection.agent.request(methods.agent.session.resume, {
+          sessionId,
+          cwd,
+          mcpServers: mcpServers(options.mcpServers),
+          ...(sent ? { _meta: sent } : {}),
+        }),
+      )
+    }
+    let full = this.accessMode !== null && options.fullAccess === true && !options.hidden
+    let response: Awaited<ReturnType<typeof open>>
+    try {
+      response = await open(full)
+    } catch (error) {
+      if (!full) throw error
+      // 带完全访问参数恢复失败时回退为普通恢复，由后续模式切换逻辑再处理。
+      this.hooks.log('warn', `agy did not resume with full access: ${(error as Error).message}`)
+      full = false
+      response = await open(false)
+    }
     this.readPlan(response._meta)
     this.allowWithoutAsking(sessionId, options)
     this.openedAgy(sessionId, cwd, options)
+    this.agyMetrics?.onExistingSession(sessionId)
     // Its process started again, without the sub-agents it ran.
     this.subagents?.restarted(sessionId)
     return {
@@ -972,13 +1065,14 @@ export class AcpConnection implements AgentConnection {
         cwd,
         options,
         this.config(response.configOptions, response.modes),
+        full,
       ),
     }
   }
 
-  /** Notes where an agy session opened, for the sub-agents it starts. */
+  /** 记录每个 agy 会话打开时的目录与 MCP 服务器，供子代理加载和上下文估算复用。 */
   private openedAgy(sessionId: string, cwd: string, options: SessionOptions): void {
-    if (this.subagents) this.agyOpened.set(sessionId, { cwd, options })
+    if (this.agy) this.agyOpened.set(sessionId, { cwd, options })
   }
 
   /**
@@ -1032,6 +1126,8 @@ export class AcpConnection implements AgentConnection {
     this.agyOpened.delete(sessionId)
     this.subagentParents.delete(sessionId)
     this.subagents?.forget(sessionId)
+    this.agyMetrics?.forget(sessionId)
+    this.chunkUsage.delete(sessionId)
   }
 
   async listSessions(
@@ -1067,8 +1163,12 @@ export class AcpConnection implements AgentConnection {
       this.agyPlans.set(sessionId, { calls: new Map(), written: null, last: plans?.last ?? null })
     }
     this.prompting.add(sessionId)
-    let answer: ChainAnswer
+    this.chunkUsage.delete(sessionId)
+    let answer: ChainAnswer | null = null
+    let chunked: TokenTotals | null
+    let failed = false
     try {
+      await this.agyMetrics?.preparePrompt(sessionId)
       const sent = this.sendPrompt(sessionId, prompt)
       if (this.agy && steersAgy(this.version)) {
         const chain = new PromptChain(sent)
@@ -1086,18 +1186,26 @@ export class AcpConnection implements AgentConnection {
           models: mapModelUsage(response._meta),
         }
       }
+    } catch (error) {
+      failed = true
+      throw error
     } finally {
       this.prompting.delete(sessionId)
-      this.carryCommands(sessionId)
+      chunked = this.chunkUsage.get(sessionId) ?? null
+      this.chunkUsage.delete(sessionId)
+      const aborted = failed || answer?.response.stopReason === 'cancelled'
+      this.carryCommands(sessionId, aborted)
       this.subagents?.turnEnded(sessionId)
       await this.switchPending(sessionId)
     }
-    const { response } = answer
+    const { response, tokens, models } = answer!
     const result: PromptResult = {
       stopReason: isStopReason(response.stopReason) ? response.stopReason : 'end_turn',
-      tokens: answer.tokens,
-      models: answer.models,
+      // What the response reports wins, so a call is never counted from both.
+      tokens: tokens ?? (models.length === 0 ? chunked : null),
+      models,
     }
+    this.agyMetrics?.onPromptEnd(sessionId, result.stopReason)
     if (planning && result.stopReason === 'end_turn') await this.showPlan(sessionId)
     if (this.agy && result.stopReason === 'end_turn' && compactsAgy(this.version)) {
       if (sentCompact(prompt)) this.showCompaction(sessionId)
@@ -1135,10 +1243,10 @@ export class AcpConnection implements AgentConnection {
   }
 
   /** The turn ended: the commands still running carry on, on the session board. */
-  private carryCommands(sessionId: string): void {
+  private carryCommands(sessionId: string, aborted = false): void {
     const commands = this.agyCommands.get(sessionId)
     const target = this.targets.get(sessionId)
-    if (!commands || !target || !commands.turnEnded()) return
+    if (!commands || !target || !commands.turnEnded(aborted)) return
     this.showCommands(target, commands)
   }
 
@@ -1364,7 +1472,12 @@ export class AcpConnection implements AgentConnection {
     }
     const config = await this.requestConfig(sessionId, optionId, value)
     if (!access) return config
-    access.config = withFullAccess(config, access.mode, access.full)
+    access.config = withFullAccess(
+      config,
+      access.mode,
+      access.full,
+      this.pendingState(sessionId, access),
+    )
     return access.config
   }
 
@@ -1385,6 +1498,18 @@ export class AcpConnection implements AgentConnection {
   }
 
   // Full access backed by a session's process.
+
+  /** 计算当前会话在完全访问切换上的挂起/重启状态。 */
+  private pendingState(sessionId: string, access: ProcessAccess): PendingConfig | null {
+    if (access.switching !== null) return { value: access.switching, wait: 'restarting' }
+    if (access.pending !== null) {
+      return {
+        value: access.pending,
+        wait: this.prompting.has(sessionId) ? 'turn' : 'background',
+      }
+    }
+    return null
+  }
 
   /**
    * Records the ordinary or flagged process behind the session and exposes its Full access option.
@@ -1409,22 +1534,45 @@ export class AcpConnection implements AgentConnection {
       full,
       config: shown,
       pending: null,
+      switching: null,
       restarting: null,
     })
     return shown
   }
 
-  /** Keeps the displayed access mode tied to the process the host actually started. */
+  /**
+   * Keeps the displayed access mode tied to the process the host actually started: it merges the
+   * harness's reported config updates with the Full access option and the pending switch, so a
+   * push during a restart cannot overwrite what the switch is still working on.
+   */
   private withAccess(sessionId: string, out: MapperOutput): MapperOutput {
     const access = this.processAccess.get(sessionId)
     if (!access) return out
+    const pending = this.pendingState(sessionId, access)
     for (const patch of out.patches) {
       if (patch.op !== 'session.update' || !patch.changes.config) continue
+      // OMP answers a restart with its own mode push; keep the pushed config away until it ends.
       if (access.mode === OMP_FULL_ACCESS && access.restarting) {
         delete patch.changes.config
         continue
       }
-      access.config = withFullAccess(patch.changes.config, access.mode, access.full)
+      // A restart reports the default mode before session/resume completes; keep the mode the
+      // session had, with the restarting notice.
+      if (access.switching !== null) {
+        const keptMode = currentMode(access.config)
+        const stabilized =
+          keptMode !== null && !access.full
+            ? patch.changes.config.map((option) =>
+                option.id === MODE_OPTION && option.type === 'select'
+                  ? { ...option, value: keptMode }
+                  : option,
+              )
+            : patch.changes.config
+        access.config = withFullAccess(stabilized, access.mode, access.full, pending)
+        patch.changes.config = access.config
+        continue
+      }
+      access.config = withFullAccess(patch.changes.config, access.mode, access.full, pending)
       patch.changes.config = access.config
     }
     return out
@@ -1432,8 +1580,9 @@ export class AcpConnection implements AgentConnection {
 
   /**
    * A mode chosen in a session that offers full access: entering or leaving it restarts the
-   * session's process, at once between turns and once the turn ends during one. Null for any
-   * other mode, which the harness sets itself and which replaces a restart still waiting.
+   * session's process, at once between turns and once the turn ends during one; while a turn or a
+   * background command runs, the switch is held and shown as pending. Null for any other mode,
+   * which the harness sets itself and which replaces a restart still waiting.
    */
   private async switchAccess(
     sessionId: string,
@@ -1445,12 +1594,28 @@ export class AcpConnection implements AgentConnection {
       throw new AgentRequestError('agent_error', 'Hidden sessions cannot enter Full access')
     }
     if (full === access.full) {
+      const hadPending = access.pending !== null
       access.pending = null
-      return full ? access.config : null
+      if (full) {
+        access.config = withFullAccess(access.config, access.mode, true)
+        return access.config
+      }
+      // 取消之前挂起的完全访问切换（重新选中当前已生效模式）时直接清掉 pending，无需再发 RPC。
+      if (hadPending && currentMode(access.config) === mode) {
+        access.config = withFullAccess(access.config, access.mode, false)
+        return access.config
+      }
+      return null
     }
-    // A restart would stop the turn, and the commands that outlived theirs.
+    // 重启会中断当前回合以及跨回合运行的后台命令或子智能体，挂起并向界面同步等待原因。
     if (this.prompting.has(sessionId) || this.runsCommands(sessionId)) {
       access.pending = mode
+      access.config = withFullAccess(
+        access.config,
+        access.mode,
+        access.full,
+        this.pendingState(sessionId, access),
+      )
       return access.config
     }
     access.pending = null
@@ -1458,13 +1623,24 @@ export class AcpConnection implements AgentConnection {
   }
 
   /**
-   * The switch chosen while the turn or a command ran, now that nothing does; a failure goes in
-   * the thread.
+   * 在回合或后台任务结束后执行挂起的模式切换；若仍被后台任务阻塞则刷新等待原因，失败时回滚并通知。
    */
   private async switchPending(sessionId: string): Promise<void> {
     const access = this.processAccess.get(sessionId)
     const mode = access?.pending
-    if (!access || !mode || this.prompting.has(sessionId) || this.runsCommands(sessionId)) return
+    if (!access || !mode) return
+    if (this.prompting.has(sessionId) || this.runsCommands(sessionId)) {
+      const next = this.pendingState(sessionId, access)
+      const prev = access.config.find((option) => option.id === MODE_OPTION)?.pending
+      if (next && (prev?.wait !== next.wait || prev?.value !== next.value)) {
+        access.config = withFullAccess(access.config, access.mode, access.full, next)
+        this.targets.get(sessionId)?.apply({
+          patches: [{ op: 'session.update', changes: { config: access.config } }],
+          effects: [],
+        })
+      }
+      return
+    }
     access.pending = null
     const full = mode === access.mode
     if (full === access.full || this.isClosed) return
@@ -1483,7 +1659,10 @@ export class AcpConnection implements AgentConnection {
       const target = this.targets.get(sessionId)
       if (!target) return
       const ctx = target.context()
-      const out: MapperOutput = { patches: [], effects: [] }
+      const out: MapperOutput = {
+        patches: [{ op: 'session.update', changes: { config: access.config } }],
+        effects: [],
+      }
       addEntry(ctx, out, {
         kind: 'notice',
         id: ctx.nextId(),
@@ -1500,7 +1679,8 @@ export class AcpConnection implements AgentConnection {
 
   /**
    * Replaces only this session's process, restoring its settings before reporting a successful
-   * switch. On failure it tries to restore the previous process and mode.
+   * switch, with a restarting notice while it goes. On failure it tries to restore the previous
+   * process and mode.
    */
   private async restartAccess(
     sessionId: string,
@@ -1508,9 +1688,27 @@ export class AcpConnection implements AgentConnection {
     full: boolean,
     mode: string,
   ): Promise<ConfigOption[]> {
-    const before = { full: access.full, config: access.config }
+    const before = {
+      full: access.full,
+      config: withFullAccess(access.config, access.mode, access.full),
+    }
     const was = currentMode(before.config)
     const target = this.targets.get(sessionId)
+    access.switching = mode
+    target?.apply({
+      patches: [
+        {
+          op: 'session.update',
+          changes: {
+            config: withFullAccess(before.config, access.mode, before.full, {
+              value: mode,
+              wait: 'restarting',
+            }),
+          },
+        },
+      ],
+      effects: [],
+    })
     // OMP extensions can use host tools as the new process opens. Hide the old grant first.
     if (access.mode === OMP_FULL_ACCESS && before.full) {
       target?.apply({
@@ -1523,24 +1721,32 @@ export class AcpConnection implements AgentConnection {
         effects: [],
       })
     }
-    const run = this.resumeAccess(sessionId, access, full, mode, before.config).catch(
-      async (error: unknown) => {
-        const restored = await this.resumeAccess(
-          sessionId,
-          access,
-          before.full,
-          was === null || was === access.mode ? HELD_MODE : was,
-          before.config,
-        ).catch(() => null)
-        if (access.mode === OMP_FULL_ACCESS && restored) {
-          target?.apply({
-            patches: [{ op: 'session.update', changes: { config: restored } }],
-            effects: [],
-          })
+    const run = this.resumeAccess(sessionId, access, full, mode, before.config)
+      .then((config) => {
+        access.switching = null
+        return config
+      })
+      .catch(async (error: unknown) => {
+        try {
+          access.config = await this.resumeAccess(
+            sessionId,
+            access,
+            before.full,
+            was === null || was === access.mode ? HELD_MODE : was,
+            before.config,
+          )
+        } catch {
+          access.full = before.full
+          access.config = before.config
+        } finally {
+          access.switching = null
         }
+        this.targets.get(sessionId)?.apply({
+          patches: [{ op: 'session.update', changes: { config: access.config } }],
+          effects: [],
+        })
         throw this.toError(error)
-      },
-    )
+      })
     const restarting = run.then(
       () => {},
       () => {},

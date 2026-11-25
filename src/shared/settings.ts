@@ -53,6 +53,7 @@ export interface SettingsFile {
     openAtLogin: boolean // start at login, so routines keep their schedule
     background: boolean // keep running with the tray icon after the last window closes
     sessionTitles: boolean // a small model titles a session its agent leaves untitled
+    promptSuggestions: boolean // the agent guesses the next message after a turn, filled with Tab
     continueAfterLimit: boolean // a session carries on when the window that stopped it resets
     agentPasswords: boolean // agents type passwords and codes the user gave them or the project holds
     lightModel: LightModel // replaced whole
@@ -140,7 +141,12 @@ export interface SettingsFile {
     // Held on while remote access is and the relay is off, when devices have no other way.
     direct: DirectSettings
     terminal: boolean // devices may use this computer's terminals, which run any command
-    relay: boolean // Use the Kettu relay, while this computer is signed in to a Kettu account
+    // Which relay devices reach this computer through: the Kettu relay while it is signed in to a
+    // Kettu account, the owner's own relay, or none.
+    relay: RelayChoice
+    // The owner's own relay, kept while another is chosen; its access key is kept apart, like the
+    // host's private key, and never in this file.
+    ownRelay: OwnRelaySettings | null
     // Devices of the same Kettu account find this computer on the relay and ask to be added.
     discoverable: boolean
   }
@@ -150,6 +156,17 @@ export interface SettingsFile {
   // the self-hosted mode, in which no process of this computer reaches them.
   cloud: { enabled: boolean }
   onboarding: OnboardingState
+}
+
+/** The relay a host uses: Kettu's, the owner's own, or none. */
+export type RelayChoice = 'kettu' | 'own' | 'off'
+
+export const RELAY_CHOICES: readonly RelayChoice[] = ['kettu', 'own', 'off']
+
+/** A relay the owner runs: its origin, and the pin of its certificate when it is at an address. */
+export interface OwnRelaySettings {
+  url: string
+  pin: string | null
 }
 
 /** Devices connecting over TCP on the same network or a VPN, without the relay. */
@@ -282,6 +299,7 @@ export const DEFAULT_SETTINGS: SettingsFile = {
     openAtLogin: false,
     background: false,
     sessionTitles: true,
+    promptSuggestions: true,
     continueAfterLimit: true,
     agentPasswords: false,
     lightModel: { mode: 'small' },
@@ -330,7 +348,8 @@ export const DEFAULT_SETTINGS: SettingsFile = {
     name: null,
     direct: { enabled: true, port: null, addresses: [] },
     terminal: false,
-    relay: true,
+    relay: 'kettu',
+    ownRelay: null,
     discoverable: true,
   },
   computerUse: { enabled: false, allowedApps: [], pauseOnUse: true, stopShortcut: '' },
@@ -425,7 +444,9 @@ export interface SettingsPatch {
     // `port` from 1024: below it a port may need privileges; the list is replaced whole.
     direct?: { enabled?: boolean; port?: number; addresses?: DirectAddress[] }
     terminal?: boolean
-    relay?: boolean
+    // A boolean from older clients: true is the Kettu relay, false none. `own` needs a relay that
+    // passed its check before, since only that check sets its address.
+    relay?: RelayChoice | boolean
     discoverable?: boolean
   }
 }
@@ -446,6 +467,7 @@ export interface HostSettings {
   workflow: SettingsFile['workflow']
   usage: { fromComputer: boolean }
   sessionTitles: boolean // write a title for a session its agent leaves untitled
+  promptSuggestions: boolean // ask the agent for a guess at the next message after each turn
   continueAfterLimit: boolean // carry a session on when the window that stopped it resets
   agentPasswords: boolean // agents may type passwords and codes, at a terminal's password prompt too
   lightModel: LightModel // which model Kettu's own requests ask

@@ -12,39 +12,24 @@ import { fitViewport, type BrowserNotice, type BrowserViewport } from '@shared/b
 import { onAppEvent } from '@renderer/app/events'
 import { useControlAgent } from '@renderer/components/control/use-control-agent'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
-import {
-  PaneEmpty,
-  PaneHead,
-  PaneIcon,
-  PaneSheet,
-  PanelButton,
-} from '@renderer/features/shell/panel-button'
+import { PaneBody, PaneEmpty, PaneIcon, PanelButton } from '@renderer/features/shell/panel-button'
 import { hostOfPath } from '@renderer/lib/host-paths'
 import { isMac } from '@renderer/lib/platform'
 import { agentName } from '@renderer/stores/agents'
 import { useSessionsStore } from '@renderer/stores/sessions'
 import { useBrowserStore } from '@renderer/stores/browser'
-import { useOverlayOpen } from '@renderer/stores/overlays'
+import { useOpenOverlays } from '@renderer/stores/overlays'
 import { useSettingsStore } from '@renderer/stores/settings'
 import { panelSession } from '@renderer/stores/view'
 import { AddressField } from './address-field'
-import { SurfaceTabs } from '@renderer/features/shell/surface-tabs'
 import { OriginBar } from './origin-bar'
 import { BringSignInsOffer, SignInChip } from './sign-in-offer'
 
 /**
- * The side panel's Browser pane: a session's tabs, the selected one's page drawn by main over the
- * pane's page area.
+ * What a page's tab shows in the side panel: the context bar with its navigation and address,
+ * and the selected tab's page, drawn by main over the page area.
  */
-export function BrowserPane({
-  panel,
-  projectPath,
-  maximized,
-}: {
-  panel: string
-  projectPath: string
-  maximized: boolean
-}) {
+export function BrowserPane({ panel, maximized }: { panel: string; maximized: boolean }) {
   const { t } = useTranslation(['browser', 'common'])
   const sessionId = panelSession(panel)
   const state = useBrowserStore((s) => (sessionId ? s.bySession[sessionId] : undefined))
@@ -55,11 +40,13 @@ export function BrowserPane({
     sessionId ? hostOfPath(s.byId[sessionId]?.projectPath ?? '') : null,
   )
   const agent = useControlAgent(agentId, hostId)
-  const overlayOpen = useOverlayOpen()
+  const overlays = useOpenOverlays()
   const zoom = useSettingsStore((s) => s.settings.appearance.zoom)
   // The frame the page fills.
   const page = useRef<HTMLDivElement>(null)
   const address = useRef<HTMLInputElement>(null)
+  // The session the pane shows, so a capture that lands after the pane left it is dropped.
+  const live = useRef<string | null>(null)
   const name = agentId ? agentName(agentId, hostId) : t('empty.agent')
 
   // The pane shows the page, so the toggle's dot has done its work.
@@ -133,8 +120,9 @@ export function BrowserPane({
   }, [report])
 
   // An overlay that covers the page takes a still in its place: a web view is a native layer the
-  // renderer cannot draw over. A toast stays up while the pane maximizes or restores, so the
-  // check runs again then.
+  // renderer cannot draw over. The check runs whenever any overlay opens or closes, since one that
+  // covers the page can open while another is already open, and again when the pane maximizes or
+  // restores under a toast that stays up.
   useEffect(() => {
     if (!sessionId) return
     const thaw = () => {
@@ -143,11 +131,10 @@ export function BrowserPane({
         useBrowserStore.getState().setStill(sessionId, null)
       })
     }
-    if (!overlayOpen) {
+    if (Object.keys(overlays).length === 0) {
       thaw()
       return
     }
-    let cancelled = false
     const frame = requestAnimationFrame(() => {
       const area = page.current
       if (!area || !covers(area)) {
@@ -157,23 +144,29 @@ export function BrowserPane({
       void window.kettu.browser
         .freeze(sessionId)
         .then((image) => {
-          // The overlay may have closed while the page was captured; then nothing is shown.
           if (!image) return
-          if (cancelled) void window.kettu.browser.thaw(sessionId)
-          else useBrowserStore.getState().setStill(sessionId, image)
+          // Overlays may open and close while the page is captured, and a later check finds the
+          // page already frozen, so whether to keep the still is decided by what covers it now.
+          const now = page.current
+          if (live.current === sessionId && now && covers(now)) {
+            useBrowserStore.getState().setStill(sessionId, image)
+          } else {
+            void window.kettu.browser.thaw(sessionId).finally(() => {
+              useBrowserStore.getState().setStill(sessionId, null)
+            })
+          }
         })
         .catch(() => {})
     })
-    return () => {
-      cancelled = true
-      cancelAnimationFrame(frame)
-    }
-  }, [overlayOpen, sessionId, maximized])
+    return () => cancelAnimationFrame(frame)
+  }, [overlays, sessionId, maximized])
 
   // Leaving the pane or its session drops a still that is no longer in front of anything.
   useEffect(() => {
     if (!sessionId) return
+    live.current = sessionId
     return () => {
+      live.current = null
       if (!useBrowserStore.getState().stills[sessionId]) return
       void window.kettu.browser.thaw(sessionId)
       useBrowserStore.getState().setStill(sessionId, null)
@@ -183,28 +176,12 @@ export function BrowserPane({
   const url = state?.url ?? null
 
   return (
-    <PaneSheet pane="browser" maximized={maximized} data-browser-panel="">
-      <PaneHead
-        panel={panel}
-        pane="browser"
-        maximized={maximized}
-        tools={
-          <PanelButton
-            label={t('actions.openExternal')}
-            disabled={!url}
-            onClick={() => sessionId && void window.kettu.browser.openExternal(sessionId)}
-          >
-            <PaneIcon icon={LinkSquare02Icon} />
-          </PanelButton>
-        }
-      >
-        <SurfaceTabs panel={panel} projectPath={projectPath} />
-      </PaneHead>
+    <PaneBody data-browser-panel="">
       <div className="kp-body">
         {/* A page without an address, such as a popup still at about:blank, is on screen too. */}
         {state && (url || state.page) ? (
           <>
-            <div className="kp-addr-row">
+            <div className="kp-ctx kp-addr-row">
               <PanelButton
                 label={t('actions.back')}
                 shortcut={isMac ? '⌘[' : 'Ctrl+['}
@@ -250,6 +227,13 @@ export function BrowserPane({
                   />
                 }
               />
+              <PanelButton
+                label={t('actions.openExternal')}
+                disabled={!url}
+                onClick={() => sessionId && void window.kettu.browser.openExternal(sessionId)}
+              >
+                <PaneIcon icon={LinkSquare02Icon} />
+              </PanelButton>
               {state.loading && (
                 <span role="progressbar" aria-label={t('loading')} className="kp-load" />
               )}
@@ -303,7 +287,7 @@ export function BrowserPane({
           </>
         )}
       </div>
-    </PaneSheet>
+    </PaneBody>
   )
 }
 

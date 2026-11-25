@@ -2,7 +2,14 @@
 // reaches with a token of its own, or for OpenCode with its process and folder's token. Streamable
 // HTTP in plain JSON, one stateless transport per request.
 
-import { DEVICE_TOOLS, DeviceTools, isDeviceToolName, type DeviceToolDeps } from '../devices/tools'
+import {
+  DEVICE_AUTO_MODE_TOOLS,
+  DEVICE_READ_TOOLS,
+  DEVICE_TOOLS,
+  DeviceTools,
+  isDeviceToolName,
+  type DeviceToolDeps,
+} from '../devices/tools'
 import {
   callGuide,
   GUIDE_TOOL,
@@ -14,6 +21,7 @@ import {
 } from '../guide/guide'
 import {
   isTerminalToolName,
+  TERMINAL_AUTO_MODE_TOOLS,
   TERMINAL_READ_TOOLS,
   TERMINAL_TOOLS,
   TerminalTools,
@@ -64,6 +72,7 @@ import {
 } from '../session-tools'
 import {
   BrowserTools,
+  BROWSER_AUTO_MODE_TOOLS,
   BROWSER_READ_TOOLS,
   BROWSER_TOOLS,
   isBrowserToolName,
@@ -91,7 +100,7 @@ import {
   ReportTools,
   type ReportToolsDeps,
 } from '../report-tool'
-import { COMPUTER_TOOLS } from '../computer/tools'
+import { COMPUTER_AUTO_MODE_TOOLS, COMPUTER_READ_TOOLS, COMPUTER_TOOLS } from '../computer/tools'
 import {
   isMemoryToolName,
   MEMORY_TOOL_NAMES,
@@ -105,10 +114,27 @@ import {
   KnowledgeTools,
   type KnowledgeToolsDeps,
 } from '../knowledge/tools'
+import {
+  isSkillToolName,
+  SKILL_TOOL_NAMES,
+  SKILL_TOOLS,
+  SkillTools,
+  type SkillToolsDeps,
+} from '../marketplace/skill-tools'
+import { isPluginToolName } from '@shared/plugins'
+import type { PluginTools } from '../plugin-runtime/tools'
 import { artifactWrite, type ArtifactWrite } from './entries'
 import type { ArtifactData } from './runtime/data'
-import { DATA_TOOLS, DataTools, isDataToolName } from './runtime/data-tools'
-import { ArtifactTools, isToolName, TOOLS, type ArtifactToolsDeps, type Caller } from './tools'
+import { DATA_READ_TOOLS, DATA_TOOLS, DataTools, isDataToolName } from './runtime/data-tools'
+import {
+  ARTIFACT_AUTO_MODE_TOOLS,
+  ARTIFACT_READ_TOOLS,
+  ArtifactTools,
+  isToolName,
+  TOOLS,
+  type ArtifactToolsDeps,
+  type Caller,
+} from './tools'
 
 export { SERVICE_NAME }
 export const SERVICE_PATH = '/mcp'
@@ -241,6 +267,10 @@ export interface ArtifactServiceDeps extends ArtifactToolsDeps {
   market?: MarketTools
   /** Kettu's settings tools; without them the service lists none. */
   settings?: SettingsTools
+  /** The tools the plugins that are on give agents; without it the service lists none. */
+  plugins?: PluginTools
+  /** The skills behind the skill tools, which only an agent that loads no skill folders gets. */
+  skills?: SkillToolsDeps
   /** The proxy to the Marketplace's OAuth servers, under its own paths; without it none. */
   proxy?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, path: string): Promise<void>
@@ -284,24 +314,31 @@ function entry(url: string, token: string, prompt: string): McpServer[] {
       name: SERVICE_NAME,
       url,
       headers: [{ name: 'Authorization', value: `Bearer ${token}` }],
-      // Kettu's own tools, which reach no further than its thread, memory, the project's sessions,
-      // its own guide, reading the user's Marketplace listings, listing, reading and naming the
-      // session's terminals and reading its browser's pages, a terminal, name or tab of the
-      // user's asking them in Kettu's own card; the
-      // browser, computer use, devices, running and typing in terminals and artifacts still ask.
-      // Publishing, unlisting and the settings tools ask in Kettu's own card where they ask, so
-      // the agent's prompt never does.
+      // Kettu 内置安全只读及自带内部确认卡的工具：在所有模式下自动放行，不重复弹出 Agent 权限卡。
       autoAllow: [
         PLAN_TOOL,
+        ...ARTIFACT_READ_TOOLS,
+        ...DATA_READ_TOOLS,
         ...TERMINAL_READ_TOOLS,
         ...BROWSER_READ_TOOLS,
+        ...DEVICE_READ_TOOLS,
+        ...COMPUTER_READ_TOOLS,
         REPORT_TOOL,
         GUIDE_TOOL,
+        ...SKILL_TOOL_NAMES,
         ...MEMORY_TOOL_NAMES,
         ...SESSION_TOOLS.map((tool) => tool.name),
         ...WORKFLOW_TOOL_NAMES,
         ...MARKET_AUTO_ALLOW,
         ...SETTINGS_TOOL_NAMES,
+      ],
+      // 仅在 Auto 权限模式下自动放行的可回滚内置工具（不可逆删除、高危终端命令、桌面点击/键入与插件工具仍需确认）。
+      autoModeAllow: [
+        ...ARTIFACT_AUTO_MODE_TOOLS,
+        ...BROWSER_AUTO_MODE_TOOLS,
+        ...DEVICE_AUTO_MODE_TOOLS,
+        ...TERMINAL_AUTO_MODE_TOOLS,
+        ...COMPUTER_AUTO_MODE_TOOLS,
       ],
       prompt,
       secret: true,
@@ -353,6 +390,7 @@ export class ArtifactService {
   private readonly terminalTools: TerminalTools | null
   private readonly dataTools: DataTools | null
   private readonly workflowTools: WorkflowTools | null
+  private readonly skillTools: SkillTools | null
   private sdk: Promise<Sdk> | null = null
   /** Why the last `start()` could not listen; cleared once it does. */
   private startError: string | null = null
@@ -367,6 +405,7 @@ export class ArtifactService {
     this.memoryTools = deps.memory ? new MemoryTools(deps.memory) : null
     this.knowledgeTools = deps.knowledge ? new KnowledgeTools(deps.knowledge) : null
     this.workflowTools = deps.workflow ? new WorkflowTools(deps.workflow) : null
+    this.skillTools = deps.skills ? new SkillTools(deps.skills) : null
     this.serviceTools = deps.computer ? [...SERVICE_TOOLS, ...COMPUTER_TOOLS] : SERVICE_TOOLS
     const browserCall = deps.browserCall
     this.browserTools = new BrowserTools({
@@ -518,14 +557,20 @@ export class ArtifactService {
   /** Every tool the session may use now; a step's session alone gets the step's tools. */
   private allTools(grant?: Grant): Tool[] {
     const sessionId = grant && 'sessionId' in grant ? grant.sessionId : null
+    // Without a session, as for the Marketplace's page, every tool some agent gets.
+    const skills = grant
+      ? sessionId !== null && this.skillTools?.listed(sessionId)
+      : this.skillTools
     return [
       guideTool(this.guideFlags),
+      ...(skills ? SKILL_TOOLS : []),
       ...(this.terminalTools?.listed(this.serviceTools) ?? this.serviceTools),
       ...(this.memoryOn ? MEMORY_TOOLS : []),
       ...(this.knowledgeTools ? KNOWLEDGE_TOOLS : []),
       ...(this.marketOn ? MARKET_TOOLS : []),
       ...(this.workflowTools?.listed(sessionId) ?? []),
       ...(this.deps.settings ? SETTINGS_TOOLS : []),
+      ...(this.deps.plugins?.listed() ?? []),
     ]
   }
 
@@ -534,7 +579,9 @@ export class ArtifactService {
     return this.listedTools().map((tool) => ({
       name: tool.name,
       description: firstSentence(tool.description ?? ''),
-      group: TOOL_GROUPS.get(tool.name) ?? 'sessions',
+      group: this.deps.plugins?.has(tool.name)
+        ? 'plugins'
+        : (TOOL_GROUPS.get(tool.name) ?? 'sessions'),
       asks: ASKING_TOOLS.has(tool.name),
     }))
   }
@@ -829,7 +876,15 @@ export class ArtifactService {
     if (call.arguments === undefined) return described(tool)
     try {
       const result = await this.callTool(sdk, grant, caller, tool.name, call.arguments, flags)
-      return result.isError ? withArguments(result, tool) : result
+      if (!result.isError) return result
+      // A plugin's tool that took its arguments and then failed has nothing in them to correct.
+      if (
+        isPluginToolName(tool.name) &&
+        !this.deps.plugins?.argumentsWrong(tool.name, call.arguments)
+      ) {
+        return result
+      }
+      return withArguments(result, tool)
     } catch (error) {
       const text = (error as Error).message
       return withArguments({ content: [{ type: 'text', text }], isError: true }, tool)
@@ -863,6 +918,7 @@ export class ArtifactService {
   ): Promise<CallToolResult> {
     const { ErrorCode, McpError } = sdk
     if (name === GUIDE_TOOL) return this.guideCall(grant, input, flags)
+    if (this.skillTools && isSkillToolName(name)) return this.skillTools.call(caller, name, input)
     if (isSessionToolName(name)) {
       try {
         return await this.sessionTools.call(caller, name, input)
@@ -937,6 +993,8 @@ export class ArtifactService {
         throw new McpError(ErrorCode.InternalError, `${name} failed: ${(error as Error).message}`)
       }
     }
+    // A plugin that was turned off since the agent listed its tools answers that it is off.
+    if (this.deps.plugins && isPluginToolName(name)) return this.deps.plugins.call(name, input)
     if (isBrowserToolName(name)) {
       try {
         return await this.browserTools.call(caller, name, input)

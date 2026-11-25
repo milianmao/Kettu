@@ -39,10 +39,15 @@ import { isAbsolutePath } from '../agent-host/paths'
 import type { AgentFolders } from './agent-folders'
 import { isExecutableFile } from './executable'
 import { t } from './i18n'
+import { createLogger } from './log'
 import { MarketKeysError } from './market-keys'
 import type { SettingsStore } from './settings'
 import { SettingsError } from './settings-schema'
+import { parseOwnRelayInput } from './own-relay'
+import type { OwnRelayCheck, OwnRelayInput } from '@shared/remote/own-relay'
 import { checkThemeText, type ThemeReadResult, type ThemeSelect } from './themes'
+
+const log = createLogger('host-admin')
 
 // Windows extended-length paths go up to 32,767 characters.
 const PATH_CHARS = 32_767
@@ -126,6 +131,8 @@ export interface AdminRemote {
   reset(): Promise<void>
   retryDirect(): void
   retryRelay(): void
+  /** Checks the owner's own relay and switches to it once it passed; the key is never answered. */
+  useOwnRelay(input: OwnRelayInput): Promise<OwnRelayCheck>
 }
 
 /** Publishing artifacts, whose methods check their own arguments. */
@@ -282,6 +289,13 @@ export class HostAdmin {
 
   themesChanged(themes: HostThemes): void {
     this.deps.send({ type: 'themes.changed', themes }, null)
+  }
+
+  /** Reads the themes again, as when plugins bring or take away their own. */
+  refreshThemes(): void {
+    void this.deps.themes.refresh().catch((error: unknown) => {
+      log.error('Could not read the themes plugins bring', error)
+    })
   }
 
   /** What needs the user, which the devices notify about as the host's own window does. */
@@ -461,6 +475,11 @@ export class HostAdmin {
       case 'remote.retryRelay':
         remote.retryRelay()
         return null
+      case 'remote.useOwnRelay': {
+        const input = parseOwnRelayInput(params)
+        if (!input) throw invalid('params must be an address, a key or null, and a pin or null')
+        return remote.useOwnRelay(input)
+      }
       case 'host.info':
         return this.deps.info()
       case 'host.restart': {

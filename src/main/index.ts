@@ -83,12 +83,18 @@ import {
   loadDeviceKey,
   loadIdentity,
   loadRelayKey,
+  loadAccessKey,
+  saveAccessKey,
   newIdentity,
   newRelayKey,
   type IdentityCipher,
 } from './remote-identity'
 import { watchPresence } from './presence'
 import { RelayFeatures, RelayToken, readRelayFeatures } from './relay-token'
+import { useOwnRelay } from './own-relay'
+import { checkRelayHere } from '../remote-host/relay-net'
+import { accessKeyEnd, relayChoiceInit } from '@shared/remote/own-relay'
+import { relayReport } from '@shared/remote/status'
 import { readJsonFile } from './json-file'
 import { MarketKeys, marketKeysFile } from './market-keys'
 import { MarketUnauthorized, runMarketCall } from './market-api'
@@ -102,9 +108,10 @@ import { answerSettingsCall } from './settings-call'
 import { effectiveDirect, hostSettings, reachesHost, terminalSettings } from './settings-schema'
 import { hasPendingFrame, isRevoked, watchSubframes } from './subframes'
 import { DeviceHost } from './device-host'
+import { PluginHost } from './plugin-host'
 import { TerminalHost } from './terminal-host'
 import { ThemeCatalog } from './theme-catalog'
-import { readThemeFolder, readThemeSources, ThemeStore } from './themes'
+import { readPluginThemes, readThemeFolder, readThemeSources, ThemeStore } from './themes'
 import { KettuTray } from './tray'
 import { openTrayTarget, TrayPanel } from './tray-panel'
 import { Updater } from './updater'
@@ -119,6 +126,7 @@ import {
 } from './app-log'
 import { redactLogText } from '@shared/log/process-log'
 import { writeReport } from '@shared/log/report-bundle'
+import { PLUGIN_THEMES_FILE } from '@shared/plugin-themes'
 import {
   applyTheme,
   applyWindowTheme,
@@ -170,6 +178,7 @@ async function start(): Promise<void> {
   const userDataPath = app.getPath('userData')
   const themesDir = join(userDataPath, 'themes')
   const themeSourcesFile = join(userDataPath, 'theme-sources.json')
+  const pluginThemesFile = join(userDataPath, PLUGIN_THEMES_FILE)
   // Read while Electron starts, so the first window already has the right theme and bounds.
   const loading = Promise.all([
     SettingsStore.load(userDataPath),
@@ -177,6 +186,7 @@ async function start(): Promise<void> {
     AppStateStore.load(userDataPath),
     readThemeFolder(themesDir),
     readThemeSources(themeSourcesFile),
+    readPluginThemes(pluginThemesFile),
   ])
   let ready = false
   app.on('second-instance', (_event, _argv, _cwd, data) => {
@@ -203,7 +213,7 @@ async function start(): Promise<void> {
     (contents) => isRevoked(contents) || hasPendingFrame(contents),
     () => !!computerHold?.window,
   )
-  const [settings, windowState, appState, themeFolder, themeSources] = await loading
+  const [settings, windowState, appState, themeFolder, themeSources, pluginThemes] = await loading
   syncLoginItem(settings.get().general.openAtLogin)
   const start = startMode(
     process.platform,
@@ -260,19 +270,26 @@ async function start(): Promise<void> {
   // The overlays follow the themes as the window does; they are made after them.
   const browserViewsRef: { current: BrowserViews | null } = { current: null }
   const computerOverlayRef: { current: ComputerOverlay | null } = { current: null }
-  const themes = new ThemeStore(themeFolder, themeSources, settings.get().appearance.colorTheme, {
-    dir: themesDir,
-    sourcesFile: themeSourcesFile,
-    catalog,
-    select: (id) => settings.update({ appearance: { colorTheme: id } }),
-    changed: (state, chosen) => {
-      applyWindowTheme(chosen)
-      broadcast('themes:changed', state)
-      browserViewsRef.current?.lookChanged()
-      computerOverlayRef.current?.settingsChanged()
-      hostAdmin?.themesChanged(themes.hostThemes())
+  const themes = new ThemeStore(
+    themeFolder,
+    themeSources,
+    pluginThemes,
+    settings.get().appearance.colorTheme,
+    {
+      dir: themesDir,
+      sourcesFile: themeSourcesFile,
+      pluginFile: pluginThemesFile,
+      catalog,
+      select: (id) => settings.update({ appearance: { colorTheme: id } }),
+      changed: (state, chosen) => {
+        applyWindowTheme(chosen)
+        broadcast('themes:changed', state)
+        browserViewsRef.current?.lookChanged()
+        computerOverlayRef.current?.settingsChanged()
+        hostAdmin?.themesChanged(themes.hostThemes())
+      },
     },
-  })
+  )
   applyWindowTheme(themes.chosenTheme())
   watchTheme()
   configureWindows({ state: windowState, systemLocale })
@@ -403,6 +420,9 @@ async function start(): Promise<void> {
     allowDevices: () => true,
     onHandedBack: (sessionId, ms) => hostRef.current?.deviceHandedBack(sessionId, ms),
   })
+  const pluginHost = new PluginHost({
+    handPort: (port) => hostRef.current?.pluginPort(port) ?? false,
+  })
   // Set once the sharing service exists; the host reports ready only after that, at each start.
   let reconcileSharing: (() => void) | null = null
   let sharingArtifactsChanged: (() => void) | null = null
@@ -440,6 +460,7 @@ async function start(): Promise<void> {
   const islandLog = createLogger('island')
   // Every host signed in to an account says its plan limit notices; this computer says each once.
   const repeatedNotices = new RepeatedNotices()
+  const colorMode = (): 'light' | 'dark' => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
   // The notch island: macOS only, started once the first window shows.
   const island = new IslandBridge({
     enabled: () => process.platform === 'darwin' && settings.get().notifications.island,
@@ -448,7 +469,7 @@ async function start(): Promise<void> {
         ? settings.get().notifications.updates
         : settings.get().notifications[ATTENTION_SETTING[kind]],
     windowFocused: () => BrowserWindow.getFocusedWindow() !== null,
-    colorMode: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
+    colorMode,
     version: app.getVersion(),
     locale: () => currentLocale(),
     strings: () => islandHelperStrings(),
@@ -494,12 +515,24 @@ async function start(): Promise<void> {
     log: islandLog,
   })
   nativeTheme.on('updated', () => island.appearanceChanged())
+  nativeTheme.on('updated', () => agentHost.pushColorMode(colorMode()))
   app.on('will-quit', () => island.quit())
   const agentHost = new AgentHost({
     settings: () => hostSettings(settings.get(), systemLocale),
+    colorMode,
     marketKeys: () => marketKeys.contentsForHost(),
+    onBattery: () => (process.platform === 'win32' ? powerMonitor.isOnBatteryPower() : null),
     onMarketOAuth: (serverId, state) => void marketKeys.setOAuth(serverId, state),
+    pluginSecret: (pluginId, key, value) =>
+      marketKeys.setPluginSecret(pluginId, key, value).then(
+        () => null,
+        (error: unknown) => (error as Error).message,
+      ),
     onFirstStart: (harnesses) => settings.firstStart(harnesses),
+    onPluginThemes: () =>
+      void themes.refresh().catch((error: unknown) => {
+        log.error('Could not read the themes plugins bring', error)
+      }),
     onAttention: (message) => {
       // While the island runs, it shows what needs the user in place of a notification.
       if (!repeatedNotices.repeated(message)) {
@@ -590,6 +623,7 @@ async function start(): Promise<void> {
           account.withAccessToken(run, (error) => error instanceof MarketUnauthorized),
         signedOut: (error) => error instanceof NotSignedIn,
       }),
+    pluginHost: (run) => pluginHost.setWanted(run),
     device: (call) =>
       deviceHost.call(call).then((answer) => {
         const opened =
@@ -656,7 +690,12 @@ async function start(): Promise<void> {
   }
   // What the relay, push and the account's hosts go by: a sign-in with Kettu's services on.
   const accountInUse = (): boolean => cloudOn() && signedIn()
-  const relayOn = (): boolean => settings.get().remote.relay && cloudOn()
+  // The own relay's access key, kept like the host's private key; one that cannot be read is
+  // given again on the page.
+  let ownRelayKey = await loadAccessKey(userDataPath, identityCipher).catch((error: unknown) => {
+    log.error('The own relay access key cannot be read', error)
+    return null
+  })
   const mainRelay = new RelayFeatures(() => readRelayFeatures(relayUrl))
   const relayToken = new RelayToken({
     current: () => account.currentToken(),
@@ -685,11 +724,16 @@ async function start(): Promise<void> {
       online: status?.online ?? [],
       plainTextKey: status?.plainTextKey ?? false,
       direct: status?.direct ?? { state: 'off' },
-      relay: !relayOn()
-        ? { state: 'off' }
-        : !signedIn()
-          ? { state: 'signed_out' }
-          : { state: 'on', relays: status?.relays ?? [] },
+      relay: relayReport({
+        choice: settings.get().remote.relay,
+        cloud: cloudOn(),
+        signedIn: signedIn(),
+        relays: status?.relays ?? [],
+        own: settings.get().remote.ownRelay,
+        ownStatus: status?.ownRelay ?? null,
+        keyEnd: accessKeyEnd(ownRelayKey),
+      }),
+      ownRelayKeyEnd: accessKeyEnd(ownRelayKey),
     }
   }
   const remoteChanged = (): void => {
@@ -832,7 +876,22 @@ async function start(): Promise<void> {
     newRelayKey: () => newRelayKey(userDataPath, identityCipher),
     relayUrl,
     pushUrl,
-    relay: relayOn,
+    relay: () => relayChoiceInit(settings.get().remote, cloudOn(), ownRelayKey),
+    useOwnRelay: (input) =>
+      useOwnRelay(input, {
+        key: () => ownRelayKey,
+        saveKey: async (key) => {
+          await saveAccessKey(userDataPath, identityCipher, key)
+          ownRelayKey = key
+        },
+        current: () => settings.get().remote.ownRelay,
+        apply: (own) => settings.useOwnRelay(own),
+        changed: () => {
+          remoteHost.relayChanged()
+          remoteChanged()
+        },
+        check: checkRelayHere,
+      }),
     discoverable: () => settings.get().remote.discoverable,
     discoveryChanged: (event) => {
       broadcast('remote:discovery', event)
@@ -977,6 +1036,7 @@ async function start(): Promise<void> {
         remoteHost.stop().then(() => agentHost.stop()),
         terminalHost.stop(),
         deviceHost.stop(),
+        pluginHost.stop(),
       ])
       hostSessions.close()
       await Promise.all([
@@ -1058,6 +1118,7 @@ async function start(): Promise<void> {
       updates: updater.getStatus().state.kind !== 'off',
       remoteSwitch: true,
       remoteReset: true,
+      ownRelay: true,
       thumbnails: true,
       partThumbnails: true,
       artifactRecords: [...ARTIFACT_RECORDS],
@@ -1222,6 +1283,11 @@ async function start(): Promise<void> {
     updater.systemShutdown()
   })
   powerMonitor.on('suspend', () => agentHost.power('suspend'))
+  // Elsewhere the host reads the battery itself.
+  if (process.platform === 'win32') {
+    powerMonitor.on('on-battery', () => agentHost.battery(true))
+    powerMonitor.on('on-ac', () => agentHost.battery(false))
+  }
   powerMonitor.on('resume', () => {
     agentHost.power('resume')
     remoteHost.resume()

@@ -15,6 +15,7 @@ import type {
   MainToTerminalHost,
   MainToDeviceHost,
   DeviceHostToMain,
+  OwnRelayInit,
   RelayInit,
   RemoteHostStatus,
   RemoteHostToMain,
@@ -30,7 +31,8 @@ import { deviceId, type NewDevice } from '@shared/remote/device'
 import type { HostAdminEvent } from '@shared/remote/host-admin'
 import { isPairingState, type PairingState } from '@shared/remote/pairing'
 import { parseRelayStatuses } from '@shared/remote/relay-host'
-import type { RelayReport, RemoteStatus } from '@shared/remote/status'
+import { relayReport, type RelayReport, type RemoteStatus } from '@shared/remote/status'
+import { accessKeyEnd, relayChoiceInit } from '@shared/remote/own-relay'
 import type { MarketAccount, MarketCall, MarketCallAnswer } from '@shared/market-publish'
 import { reportBuildResult, type ReportBuildResult } from '@shared/report'
 import type { DirectSettings, SettingsFile } from '@shared/settings'
@@ -46,6 +48,7 @@ import {
   type SettingsSection,
 } from '../main/settings-schema'
 import { ControlError, type DeviceSummary, type HostName, type HostStatus } from './control'
+import { PluginHost } from './plugin-host'
 import { ForkedHost, type HostTimings } from './forked-host'
 import { daemonUserAgent } from './update'
 
@@ -125,14 +128,20 @@ export interface HostsOptions {
   marketCall?(call: MarketCall): Promise<MarketCallAnswer>
   /** An agent's settings tool reads or changes the daemon's settings. */
   settingsCall?(call: unknown): SettingsCallAnswer
+  /** Keeps a plugin's secret in the key store, or clears it; null once the store holds it. */
+  pluginSecret?(pluginId: unknown, key: unknown, value: unknown): Promise<string | null>
   /** The agent host's first start found the programs of these harnesses; the daemon adds their agents. */
   firstStart?(harnesses: unknown): void
+  /** The themes plugins bring changed, so the daemon reads them again. */
+  pluginThemes?(): void
   /** The host's X25519 private key, in base64, for the remote host alone. */
   privateKey: string
   /** Replaces the host's identity with a new key, as resetting remote access does; its private key. */
   newIdentity(): Promise<string>
   /** The Ed25519 seed the host signs in to the relay with, in base64; null without one. */
   relayKey: string | null
+  /** The own relay's access key now, null for none. */
+  accessKey(): string | null
   /** Replaces the relay key, as resetting remote access does; its seed. */
   newRelayKey(): Promise<string>
   /** The main relay's origin. */
@@ -162,6 +171,7 @@ export class Hosts {
   private readonly terminal: ForkedHost<MainToTerminalHost, TerminalHostToMain>
   private readonly deviceHost: ForkedHost<MainToDeviceHost, DeviceHostToMain>
   private readonly remote: ForkedHost<MainToRemoteHost, RemoteHostToMain>
+  private readonly pluginHost: PluginHost
   private projects: string[] = []
   private authCommands: string[] = []
   private agentProcesses: ProcessId[] = []
@@ -174,8 +184,8 @@ export class Hosts {
   private relayToken: string | null = null
   /** The language the hosts were last told, for the text they write. */
   private sentLocale: Locale
-  /** Use the Kettu relay, as the remote host was last told. */
-  private sentRelay: boolean | null = null
+  /** The relay, as the remote host was last told, in JSON. */
+  private sentRelay: string | null = null
   private resetting: Promise<void> | null = null
   private sshPort: number | null
   /** The direct settings the remote host was last given, as JSON. */
@@ -319,6 +329,15 @@ export class Hosts {
         }
       },
     })
+    // Plugins' scripts: started when the agent host wakes the first one.
+    this.pluginHost = new PluginHost({
+      modulePath: bundle('plugin-host.cjs'),
+      wasmPath: bundle('quickjs.wasm'),
+      env: options.env,
+      inspector: (url) => options.inspector?.('plugin-host', url),
+      timings: options.timings,
+      ready: (socketPath) => this.agent.post({ type: 'host:plugin-port', socketPath }),
+    })
     // Devices reach it through its direct connections, as in the desktop app, not a socket.
     this.remote = new ForkedHost<MainToRemoteHost, RemoteHostToMain>({
       log: remoteLog,
@@ -420,14 +439,39 @@ export class Hosts {
       service: true,
       direct: status?.direct ?? { state: 'off' },
       relay: this.relayReport(),
+      ownRelayKeyEnd: accessKeyEnd(this.options.accessKey()),
     }
   }
 
-  /** The Kettu relay as Settings and `kettu status` show it. */
+  /** The relay as Settings and `kettu status` show it. */
   relayReport(): RelayReport {
-    if (!this.settings().remote.relay) return { state: 'off' }
-    if (!this.options.signedIn()) return { state: 'signed_out' }
-    return { state: 'on', relays: this.remoteStatus?.relays ?? [] }
+    const { relay, ownRelay } = this.settings().remote
+    return relayReport({
+      choice: relay,
+      // The daemon has no switch for Kettu's services.
+      cloud: true,
+      signedIn: this.options.signedIn(),
+      relays: this.remoteStatus?.relays ?? [],
+      own: ownRelay,
+      ownStatus: this.remoteStatus?.ownRelay ?? null,
+      keyEnd: accessKeyEnd(this.options.accessKey()),
+    })
+  }
+
+  /** The relay to sign in to, as the settings and the key are now. */
+  private relayInit(): { enabled: boolean; own: OwnRelayInit | null } {
+    return relayChoiceInit(this.settings().remote, true, this.options.accessKey())
+  }
+
+  /** Tells the remote host when the relay to use changed; each start reads it. */
+  relayChanged(): void {
+    const relay = this.relayInit()
+    const sent = JSON.stringify(relay)
+    if (sent === this.sentRelay) return
+    if (this.remote.post({ type: 'remote-host:relay', enabled: relay.enabled, own: relay.own })) {
+      this.sentRelay = sent
+    }
+    for (const listener of [...this.statusListeners]) listener()
   }
 
   /**
@@ -578,13 +622,7 @@ export class Hosts {
     if (changed.has('remote')) {
       this.directChanged()
       this.terminalChanged()
-      const relay = settings.remote.relay
-      if (
-        relay !== this.sentRelay &&
-        this.remote.post({ type: 'remote-host:relay', enabled: relay })
-      ) {
-        this.sentRelay = relay
-      }
+      this.relayChanged()
       const name = this.hostName()
       if (name !== this.sentHostName && this.remote.post({ type: 'remote-host:host-name', name })) {
         this.sentHostName = name
@@ -709,7 +747,8 @@ export class Hosts {
   /** The direct connections as the remote host applies them, held on while the relay is not used. */
   private direct(): DirectSettings {
     const { direct, relay } = this.settings().remote
-    return relay && this.options.signedIn() ? direct : { ...direct, enabled: true }
+    const relayUsed = (relay === 'kettu' && this.options.signedIn()) || relay === 'own'
+    return relayUsed ? direct : { ...direct, enabled: true }
   }
 
   /** Passes the direct connections' settings on when they changed; each start reads them anew. */
@@ -884,10 +923,12 @@ export class Hosts {
   }
 
   private initRelay(): RelayInit {
-    this.sentRelay = this.settings().remote.relay
+    const relay = this.relayInit()
+    this.sentRelay = JSON.stringify(relay)
     return {
       url: this.options.relayUrl,
-      enabled: this.sentRelay,
+      enabled: relay.enabled,
+      own: relay.own,
       token: this.token,
       relayToken: this.relayToken,
       ...(this.relayKey ? { key: this.relayKey } : {}),
@@ -914,6 +955,7 @@ export class Hosts {
       this.remote.stop().then(() => this.agent.stop()),
       this.terminal.stop(),
       this.deviceHost.stop(),
+      this.pluginHost.stop(),
     ])
   }
 
@@ -1000,6 +1042,12 @@ export class Hosts {
           })
         }
         break
+      case 'host:plugin-host':
+        this.pluginHost.setWanted(message.run === true)
+        break
+      case 'host:plugin-themes':
+        this.options.pluginThemes?.()
+        break
       case 'host:device-call':
         if (Number.isSafeInteger(message.callId) && typeof message.call === 'object') {
           void this.deviceCall(message.callId, message.call)
@@ -1037,6 +1085,17 @@ export class Hosts {
             callId: message.callId,
             answer: run ? run(message.call) : { error: 'The daemon keeps no settings for agents.' },
           })
+        }
+        break
+      case 'host:plugin-secret':
+        if (Number.isSafeInteger(message.callId)) {
+          const { callId } = message
+          const run = this.options.pluginSecret
+          void (
+            run
+              ? run(message.pluginId, message.key, message.value)
+              : Promise.resolve('The daemon keeps no secrets for plugins.')
+          ).then((error) => this.agent.post({ type: 'plugin-secret-result', callId, error }))
         }
         break
       case 'host:trash-call':
@@ -1101,6 +1160,8 @@ export class Hosts {
   }
 
   private agentExited(clean: boolean): void {
+    // The plugins it woke are gone with it; its next process asks again.
+    this.pluginHost.setWanted(false)
     // No turn of the agent host runs now, so none uses a device or a terminal.
     this.deviceHost.post({ type: 'device-host:turn-ended', sessionId: null })
     this.terminal.post({ type: 'terminal-host:turn-ended', sessionId: null })

@@ -58,6 +58,7 @@ import {
   BACKGROUND_RESUME_MS,
   BROWSER_FEATURE,
   IMAGE_REFS_FEATURE,
+  LOAD_FEATURE,
   negotiate,
   parseHello,
   parsePromote,
@@ -66,6 +67,7 @@ import {
   STANDBY_FEATURE,
   TOOL_DIGESTS_FEATURE,
   type Addresses,
+  type RelayMoved,
   type Closing,
   type ClosingReason,
   type DirectAddress,
@@ -368,6 +370,20 @@ export class RemoteServer {
     }
   }
 
+  /**
+   * The host is about to move to another relay, or to none: every device connected hears it.
+   * Settles once the devices reached through the relay have everything sent them so far, so the
+   * host can leave it then.
+   */
+  relayMoved(relay: HostRelay | null): Promise<void> {
+    const flushed: Promise<void>[] = []
+    for (const session of this.sessions) {
+      const sent = session.relayMoved(relay)
+      if (session.viaRelay) flushed.push(sent)
+    }
+    return Promise.all(flushed).then(() => {})
+  }
+
   /** The region list or the host's regions changed: the devices that read them hear it. */
   regionsChanged(): void {
     for (const session of this.sessions) session.regionsChanged()
@@ -580,7 +596,7 @@ class DeviceConnection {
   constructor(
     readonly transport: Transport,
     private readonly server: RemoteServer,
-    private readonly viaRelay: boolean,
+    readonly viaRelay: boolean,
   ) {
     const { options } = server
     this.timer = setTimeout(() => this.end(), options.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
@@ -1330,6 +1346,18 @@ class DeviceSession {
     this.server.sessionEnded(this)
   }
 
+  /** Settles once the device has the move and everything before it, or cannot get them now. */
+  relayMoved(relay: HostRelay | null): Promise<void> {
+    if (!this.live) return Promise.resolve()
+    this.send({ type: 'relay', relay } satisfies RelayMoved)
+    return this.outbox.flush()
+  }
+
+  /** Whether the session runs on a connection that came through the relay. */
+  get viaRelay(): boolean {
+    return this.connection?.viaRelay === true
+  }
+
   sendAddresses(addresses: DirectAddress[]): void {
     if (this.live) this.send({ type: 'addresses', addresses } satisfies Addresses)
   }
@@ -1390,6 +1418,7 @@ class DeviceSession {
       host: this.server.options.host,
       features: [
         BYTES_FEATURE,
+        LOAD_FEATURE,
         ...(this.version >= PUSH_VERSION && this.server.options.notifications?.()
           ? [PUSH_FEATURE, WEB_PUSH_FEATURE]
           : []),

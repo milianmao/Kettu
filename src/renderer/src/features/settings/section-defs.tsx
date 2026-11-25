@@ -30,7 +30,15 @@ import { useCloudOff } from '@renderer/lib/cloud'
 import { basename, mediumAgo } from '@renderer/lib/format'
 import { errorMessage } from '@renderer/lib/host'
 import { useHostContext, useHostHas } from '@renderer/lib/host-features'
-import { formatShortcut, isHosted, isMac, isWeb, isWindows, platform } from '@renderer/lib/platform'
+import {
+  formatShortcut,
+  isHosted,
+  isMac,
+  isRelayPage,
+  isWeb,
+  isWindows,
+  platform,
+} from '@renderer/lib/platform'
 import { useAppInfo } from '@renderer/lib/use-app-info'
 import { agentName, awaitsPackage, harnessStatuses, usableAgents } from '@renderer/stores/agents'
 import { useAccountStore } from '@renderer/stores/account'
@@ -45,7 +53,17 @@ import { useHostScope } from '@renderer/stores/host-scope'
 import { useUpdatesStore } from '@renderer/stores/updates'
 import { openAgentSettings, openHarnessSettings, openSettingsItem } from '@renderer/stores/view'
 import { pageRow } from '@renderer/features/sidebar/sidebar-pages'
-import { AboutHero, AutomaticUpdates, DownloadSource, NoUpdates, UpdateRow } from './about-section'
+import {
+  AboutHero,
+  AutomaticUpdates,
+  ContactEmailText,
+  CopyContactEmail,
+  DownloadSource,
+  FollowOnX,
+  NewIssue,
+  NoUpdates,
+  UpdateRow,
+} from './about-section'
 import { useIdleSessionRows } from './idle-sessions'
 import { IslandSwitch } from './island-row'
 import { useIslandDescription } from './island-state'
@@ -80,7 +98,8 @@ import { useDiscoveredHosts } from './use-discovered'
 import { AddHostButton, HostRow, HostsLoading, HostsNote, SelfRow } from './hosts-section'
 import { DevicePage } from './remote-device'
 import { DirectPortField, FoundAddresses, OwnAddresses } from './remote-direct'
-import { DirectSwitch, DiscoverableSwitch, RelayRegions, RelaySwitch } from './remote-relay'
+import { DirectSwitch, DiscoverableSwitch } from './remote-relay'
+import { RelayCard, RelayNote } from './remote-relay-choice'
 import { relayInUse } from './relay-text'
 import {
   AddDeviceButton,
@@ -249,6 +268,14 @@ export function useGeneralSection(): SectionDef {
         group: sessions,
         render: () => (
           <GeneralSwitch field="continueAfterLimit" label={t('general.continueAfterLimit.name')} />
+        ),
+      },
+      {
+        id: 'prompt-suggestions',
+        setting: 'general.prompt-suggestions',
+        group: sessions,
+        render: () => (
+          <GeneralSwitch field="promptSuggestions" label={t('general.promptSuggestions.name')} />
         ),
       },
       {
@@ -1043,6 +1070,7 @@ export function useAboutSection(): SectionDef {
   const githubOnly = useGitHubOnly()
   const cloudOffHere = useCloudOffHere()
   const updates = group('updates', t('about.groups.updates'))
+  const contact = group('contact', t('about.groups.contact'))
   return {
     id: 'about',
     title: t('sections.about'),
@@ -1078,6 +1106,15 @@ export function useAboutSection(): SectionDef {
               render: () => <DownloadSource />,
             },
           ] satisfies RowDef[])),
+      { id: 'issues', setting: 'about.issues', group: contact, render: () => <NewIssue /> },
+      {
+        id: 'email',
+        setting: 'about.email',
+        rich: <ContactEmailText />,
+        group: contact,
+        render: () => <CopyContactEmail />,
+      },
+      { id: 'x', setting: 'about.x', group: contact, render: () => <FollowOnX /> },
       {
         id: 'github',
         setting: 'about.github',
@@ -1176,12 +1213,15 @@ function useWebHostsSection(): SectionDef {
         group: group('forget', t('hosts.web.forget.name', { name }), { unlabeled: true }),
         render: () => <ForgetHost />,
       },
-      ...(isHosted
+      ...(isHosted || isRelayPage
         ? ([
             {
               id: 'others',
               setting: 'hosts.others',
-              description: t('hosts.web.others.description', { name }),
+              description: t(
+                isRelayPage ? 'hosts.web.others.descriptionRelay' : 'hosts.web.others.description',
+                { name },
+              ),
               group: group('others', t('hosts.web.others.name')),
               layout: 'custom' as const,
               render: () => <OtherWebHosts />,
@@ -1297,7 +1337,7 @@ export function useRemoteSection(): SectionDef {
   const onHost = useHostContext()
   const { useSettingsStore, useRemoteStore } = useHostScope()
   const enabled = useSettingsStore((s) => s.settings.remote.enabled)
-  const relayOn = useSettingsStore((s) => s.settings.remote.relay)
+  const relayChoice = useSettingsStore((s) => s.settings.remote.relay)
   const status = useRemoteStore((s) => s.status)
   const resettable = useHostHas('remoteReset')
   // Finding this computer and the relay are the account's, so self-hosted it shows neither.
@@ -1358,7 +1398,12 @@ export function useRemoteSection(): SectionDef {
   if (!enabled)
     return { ...base, rows: devices.length > 0 ? [switchRow, ...deviceRows] : [switchRow] }
   const direct = group('direct', t('remote.direct.group'))
-  const advanced = group('advanced', t('remote.groups.advanced'))
+  // The card draws its rows itself, since the choice decides which rows follow it.
+  const relayGroup = group('relay', t('remote.relay.group'), {
+    note: <RelayNote />,
+    card: () => <RelayCard />,
+  })
+  const permissions = group('permissions', t('remote.groups.permissions'))
   const rows: RowDef[] = [
     switchRow,
     {
@@ -1370,10 +1415,29 @@ export function useRemoteSection(): SectionDef {
     },
     ...deviceRows,
     {
+      id: 'relay',
+      setting: 'remote.relay',
+      params: onHost,
+      group: relayGroup,
+      render: () => null,
+    },
+    ...(relayChoice === 'kettu' && !cloudOff
+      ? [
+          {
+            id: 'relay-regions',
+            setting: 'remote.relay-regions',
+            group: relayGroup,
+            // Drawn by the relay's card, under the Relay row.
+            searchOnly: true,
+            render: () => null,
+          } satisfies RowDef,
+        ]
+      : []),
+    {
       id: 'direct',
       setting: 'remote.direct',
       description: t(
-        relayInUse(status) && !cloudOff
+        relayInUse(status) && (!cloudOff || relayChoice === 'own')
           ? 'remote.direct.descriptionFree'
           : 'remote.direct.description',
       ),
@@ -1405,7 +1469,7 @@ export function useRemoteSection(): SectionDef {
       id: 'terminal',
       setting: 'remote.terminal',
       params: onHost,
-      group: group('permissions', t('remote.groups.permissions')),
+      group: permissions,
       render: () => <TerminalSwitch label={t('remote.terminal.name')} />,
     },
     ...(cloudOff
@@ -1415,28 +1479,12 @@ export function useRemoteSection(): SectionDef {
             id: 'discoverable',
             setting: 'remote.discoverable',
             params: onHost,
-            group: group('permissions', t('remote.groups.permissions')),
+            // Only the Kettu relay names this computer to the account; dimmed, it says so.
+            description: relayChoice === 'own' ? t('remote.relay.onlyKettu') : undefined,
+            group: permissions,
             render: () => <DiscoverableSwitch label={t('remote.discoverable.name')} />,
           } satisfies RowDef,
-          {
-            id: 'relay',
-            setting: 'remote.relay',
-            params: onHost,
-            group: advanced,
-            render: () => <RelaySwitch label={t('remote.relay.name')} />,
-          } satisfies RowDef,
         ]),
-    ...(relayOn && !cloudOff
-      ? [
-          {
-            id: 'relay-regions',
-            setting: 'remote.relay-regions',
-            group: advanced,
-            layout: 'block',
-            render: () => <RelayRegions />,
-          } satisfies RowDef,
-        ]
-      : []),
   ]
   if (resettable !== false) {
     rows.push({
