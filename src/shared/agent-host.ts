@@ -736,6 +736,7 @@ export type McpToolGroup =
   | 'devices'
   | 'terminal'
   | 'memory'
+  | 'code'
   | 'reports'
   | 'workflows'
   | 'settings'

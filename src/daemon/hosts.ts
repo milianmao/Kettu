@@ -221,6 +221,7 @@ export class Hosts {
         fakeAgentPath: options.env.KETTU_FAKE_AGENT || null,
         threadWorkerPath: bundle('thread-worker.cjs'),
         usageWorkerPath: bundle('usage-worker.cjs'),
+        knowledgeWorkerPath: bundle('knowledge-worker.cjs'),
         sessionRouterPath: bundle('session-router.cjs'),
         clineHostPath: bundle('cline-host.cjs'),
         settings: hostSettings(options.settings(), options.systemLocale),

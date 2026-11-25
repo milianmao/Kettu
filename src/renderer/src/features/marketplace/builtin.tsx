@@ -13,6 +13,7 @@ import {
   Message01Icon,
   Settings02Icon,
   SmartPhone01Icon,
+  SourceCodeIcon,
   Store01Icon,
 } from '@hugeicons/core-free-icons'
 import type { IconSvgElement } from '@hugeicons/react'
@@ -42,6 +43,7 @@ const GROUPS: { id: McpToolGroup; icon: IconSvgElement }[] = [
   { id: 'devices', icon: SmartPhone01Icon },
   { id: 'terminal', icon: ComputerTerminal01Icon },
   { id: 'memory', icon: Brain01Icon },
+  { id: 'code', icon: SourceCodeIcon },
   { id: 'reports', icon: Flag01Icon },
   { id: 'workflows', icon: Flowchart01Icon },
   { id: 'settings', icon: Settings02Icon },

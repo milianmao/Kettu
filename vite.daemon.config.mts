@@ -47,6 +47,7 @@ export default defineConfig({
         'remote-host': source('src/remote-host/node-main.ts'),
         'thread-worker': source('src/agent-host/threads/worker.ts'),
         'usage-worker': source('src/agent-host/usage/worker.ts'),
+        'knowledge-worker': source('src/agent-host/knowledge/worker.ts'),
         'session-router': source('src/agent-host/session-router/router.ts'),
         'cline-host': source('src/agent-host/cline/cline-host.ts'),
       },

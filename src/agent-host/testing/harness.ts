@@ -40,6 +40,7 @@ import type { RoutineClock } from '../routines/scheduler'
 import type { LogReader } from '../usage/model'
 import type { FakeAppServer } from './fake-app-server'
 import { tempFolder } from './temp'
+import { inKnowledgeWorker } from './knowledge-worker'
 import { inThreadWorker } from './thread-worker'
 import { inUsageWorker } from './usage-worker'
 
@@ -312,6 +313,8 @@ export interface TestHostOptions {
   installedVersions?: Partial<Record<AgentId, string>>
   /** The thread worker, the service in the test's own thread unless given. */
   threadWorker?: HostOptions['threadWorker']
+  /** The knowledge workers, the services in the test's own thread unless given. */
+  knowledgeWorker?: HostOptions['knowledgeWorker']
 }
 
 export interface TestHost {
@@ -448,6 +451,7 @@ export async function startTestHost(options: TestHostOptions = {}): Promise<Test
     ...(options.treeNoteMs !== undefined ? { treeNoteMs: options.treeNoteMs } : {}),
     ...(options.processControl ? { processControl: options.processControl } : {}),
     threadWorker: options.threadWorker ?? inThreadWorker,
+    knowledgeWorker: options.knowledgeWorker ?? inKnowledgeWorker,
     usageWorker: (file) => inUsageWorker(file, options.usageReaders),
     ...(options.usageReaders ? { usageReaders: options.usageReaders } : {}),
     ...(options.cacheTtl ? { cacheTtl: options.cacheTtl } : {}),

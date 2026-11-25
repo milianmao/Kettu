@@ -101,6 +101,7 @@ export type MainToHost =
       fakeAgentPath: string | null // tools/fake-agent/main.ts in development, or from KETTU_FAKE_AGENT
       threadWorkerPath: string // the thread worker's bundle, which main builds beside the host's
       usageWorkerPath: string // the usage worker's bundle, built the same way
+      knowledgeWorkerPath: string // the knowledge worker's bundle, built the same way
       // The session router's bundle, which a per-session agent's process runs under the user's Node.js.
       sessionRouterPath: string
       // The bundle of the process that runs Cline's SDK, which runs on `nodeRuntime`.
